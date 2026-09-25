@@ -261,17 +261,22 @@ class Static_Site_Importer_Companion_Plugin {
 		if ( ! is_string( $internal_link_runtime ) || '' === $internal_link_runtime ) {
 			return new WP_Error( 'static_site_importer_companion_plugin_internal_link_runtime_missing', 'Internal link runtime projection file is unavailable.' );
 		}
+		$source_route_runtime = file_get_contents( __DIR__ . '/class-static-site-importer-source-route-redirect.php' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reads the versioned runtime source that generated companions own independently.
+		if ( ! is_string( $source_route_runtime ) || '' === $source_route_runtime ) {
+			return new WP_Error( 'static_site_importer_companion_plugin_source_route_runtime_missing', 'Source route redirect runtime projection file is unavailable.' );
+		}
 
-		$inventory_source = array( $block_names, $preserved, $form_visual_states, hash( 'sha256', $provider_form_runtime ), hash( 'sha256', $internal_link_runtime ) );
+		$inventory_source = array( $block_names, $preserved, $form_visual_states, hash( 'sha256', $provider_form_runtime ), hash( 'sha256', $internal_link_runtime ), hash( 'sha256', $source_route_runtime ) );
 		if ( ! empty( $editor_scripts ) ) {
 			$inventory_source[] = $editor_scripts;
 		}
-		$inventory_hash        = substr( hash( 'sha256', (string) wp_json_encode( $inventory_source ) ), 0, 16 );
-		$registration_callback = str_replace( '-', '_', $plugin_slug ) . '_' . $inventory_hash . '_register_blocks';
-		$runtime_class         = strtoupper( str_replace( '-', '_', $plugin_slug ) ) . '_Provider_Form_Runtime_V1';
-		$link_runtime_class    = strtoupper( str_replace( '-', '_', $plugin_slug ) ) . '_Internal_Link_Runtime';
-		$main_file             = $plugin_slug . '/' . $plugin_slug . '.php';
-		$config                = wp_json_encode(
+		$inventory_hash         = substr( hash( 'sha256', (string) wp_json_encode( $inventory_source ) ), 0, 16 );
+		$registration_callback  = str_replace( '-', '_', $plugin_slug ) . '_' . $inventory_hash . '_register_blocks';
+		$runtime_class          = strtoupper( str_replace( '-', '_', $plugin_slug ) ) . '_Provider_Form_Runtime_V1';
+		$link_runtime_class     = strtoupper( str_replace( '-', '_', $plugin_slug ) ) . '_Internal_Link_Runtime';
+		$redirect_runtime_class = strtoupper( str_replace( '-', '_', $plugin_slug ) ) . '_Source_Route_Redirect';
+		$main_file              = $plugin_slug . '/' . $plugin_slug . '.php';
+		$config                 = wp_json_encode(
 			array(
 				'site_name'          => $site_name,
 				'plugin_file'        => $main_file,
@@ -304,9 +309,10 @@ class Static_Site_Importer_Companion_Plugin {
 		$files[ $plugin_slug . '/companion.json' ]                        = $config . "\n";
 		$files[ $plugin_slug . '/includes/provider-form-runtime-v1.php' ] = self::provider_form_runtime_file( $provider_form_runtime, $runtime_class );
 		$files[ $plugin_slug . '/includes/internal-link-runtime.php' ]    = self::internal_link_runtime_file( $internal_link_runtime, $link_runtime_class );
+		$files[ $plugin_slug . '/includes/source-route-redirect.php' ]    = self::source_route_redirect_file( $source_route_runtime, $redirect_runtime_class );
 		$files = array_merge(
 			array(
-				$main_file => self::main_plugin_file( $plugin_slug, $inventory_hash, $runtime_class, $link_runtime_class, self::artifact_provenance( $payload ) ),
+				$main_file => self::main_plugin_file( $plugin_slug, $inventory_hash, $runtime_class, $link_runtime_class, $redirect_runtime_class, self::artifact_provenance( $payload ) ),
 			),
 			$files
 		);
@@ -708,6 +714,7 @@ class Static_Site_Importer_Companion_Plugin {
 		string $inventory_hash,
 		string $runtime_class,
 		string $link_runtime_class,
+		string $redirect_runtime_class,
 		array $artifact_provenance = array()
 	): string {
 		$fn_prefix = str_replace( '-', '_', $plugin_slug ) . '_' . $inventory_hash;
@@ -753,9 +760,11 @@ class Static_Site_Importer_Companion_Plugin {
 		$lines[] = '';
 		$lines[] = "require_once __DIR__ . '/includes/provider-form-runtime-v1.php';";
 		$lines[] = "require_once __DIR__ . '/includes/internal-link-runtime.php';";
+		$lines[] = "require_once __DIR__ . '/includes/source-route-redirect.php';";
 		$lines[] = $runtime_class . '::configure_visual_states( ' . $fn_prefix . "_config()['form_visual_states'] ?? array() );";
 		$lines[] = $runtime_class . '::register();';
 		$lines[] = $link_runtime_class . '::register();';
+		$lines[] = $redirect_runtime_class . '::register();';
 		$lines[] = '';
 		$lines[] = '/**';
 		$lines[] = ' * Register generated blocks from their metadata directories.';
@@ -856,6 +865,10 @@ class Static_Site_Importer_Companion_Plugin {
 
 	private static function internal_link_runtime_file( string $source, string $runtime_class ): string {
 		return str_replace( 'Static_Site_Importer_Internal_Link_Runtime', $runtime_class, $source );
+	}
+
+	private static function source_route_redirect_file( string $source, string $runtime_class ): string {
+		return str_replace( 'Static_Site_Importer_Source_Route_Redirect', $runtime_class, $source );
 	}
 
 	/**
@@ -1325,6 +1338,7 @@ $output = wp_kses(
 		'button' => array_merge( $global, array( 'disabled' => true, 'name' => true, 'type' => true, 'value' => true ) ),
 		'form' => array_merge( $flow, array( 'action' => true, 'method' => true ) ),
 		'fieldset' => array_merge( $flow, array( 'disabled' => true, 'name' => true ) ), 'legend' => $global,
+		'details' => array_merge( $flow, array( 'name' => true, 'open' => true ) ), 'summary' => $flow,
 		'label' => array_merge( $global, array( 'for' => true ) ),
 		'input' => array_merge( $global, array( 'autocomplete' => true, 'checked' => true, 'disabled' => true, 'max' => true, 'maxlength' => true, 'min' => true, 'minlength' => true, 'multiple' => true, 'name' => true, 'pattern' => true, 'placeholder' => true, 'readonly' => true, 'required' => true, 'step' => true, 'type' => true, 'value' => true ) ),
 		'textarea' => array_merge( $global, array( 'cols' => true, 'disabled' => true, 'maxlength' => true, 'minlength' => true, 'name' => true, 'placeholder' => true, 'readonly' => true, 'required' => true, 'rows' => true ) ),
@@ -1336,7 +1350,7 @@ $output = wp_kses(
 		'video' => array_merge( $global, array( 'autoplay' => true, 'controls' => true, 'height' => true, 'loop' => true, 'muted' => true, 'playsinline' => true, 'poster' => true, 'preload' => true, 'src' => true, 'width' => true ) ),
 		'audio' => array_merge( $global, array( 'autoplay' => true, 'controls' => true, 'loop' => true, 'muted' => true, 'preload' => true, 'src' => true ) ),
 		'svg' => array_merge( $svg_global, array( 'fill' => true, 'focusable' => true, 'height' => true, 'preserveaspectratio' => true, 'stroke' => true, 'viewbox' => true, 'width' => true, 'xmlns' => true, 'xmlns:xlink' => true ) ),
-		'defs' => $svg_global, 'symbol' => array_merge( $svg_global, array( 'viewbox' => true ) ), 'lineargradient' => array_merge( $svg_global, array( 'gradientunits' => true, 'x1' => true, 'x2' => true, 'y1' => true, 'y2' => true ) ), 'radialgradient' => array_merge( $svg_global, array( 'cx' => true, 'cy' => true, 'r' => true ) ), 'stop' => array_merge( $svg_global, array( 'offset' => true, 'stop-color' => true, 'stop-opacity' => true ) ), 'clippath' => $svg_global, 'mask' => $svg_global, 'use' => array_merge( $svg_global, array( 'href' => true, 'xlink:href' => true ) ),
+		'defs' => $svg_global, 'symbol' => array_merge( $svg_global, array( 'viewbox' => true ) ), 'lineargradient' => array_merge( $svg_global, array( 'gradientunits' => true, 'x1' => true, 'x2' => true, 'y1' => true, 'y2' => true ) ), 'radialgradient' => array_merge( $svg_global, array( 'cx' => true, 'cy' => true, 'r' => true ) ), 'stop' => array_merge( $svg_global, array( 'offset' => true, 'stop-color' => true, 'stop-opacity' => true ) ), 'clippath' => array_merge( $svg_global, array( 'clippathunits' => true, 'transform' => true ) ), 'mask' => array_merge( $svg_global, array( 'height' => true, 'maskcontentunits' => true, 'maskunits' => true, 'width' => true, 'x' => true, 'y' => true ) ), 'use' => array_merge( $svg_global, array( 'href' => true, 'xlink:href' => true ) ),
 		'filter' => array_merge( $svg_global, array( 'filterunits' => true, 'height' => true, 'primitiveunits' => true, 'width' => true, 'x' => true, 'y' => true ) ),
 		'fegaussianblur' => array_merge( $svg_global, array( 'height' => true, 'in' => true, 'result' => true, 'stddeviation' => true, 'width' => true, 'x' => true, 'y' => true ) ),
 		'femerge' => array_merge( $svg_global, array( 'height' => true, 'result' => true, 'width' => true, 'x' => true, 'y' => true ) ),

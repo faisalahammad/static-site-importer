@@ -942,6 +942,8 @@ namespace {
 			&& str_contains( $host_span_css_out, 'letter-spacing:.025em' )
 			&& str_contains( $host_span_css_out, 'text-transform:uppercase' )
 			&& 2 === preg_match_all( '/\.ssi-form-[a-f0-9]{12} \.ssi-node-[a-f0-9]{12}-wrap\{width:calc\(50% - 0\.75rem\);flex-grow:0;flex-shrink:0;flex-basis:calc\(50% - 0\.75rem\);margin-block-start:0!important\}/', $host_span_css_out )
+			&& preg_match( '/\.ssi-form-[a-f0-9]{12}\.jetpack-contact-form-container\{padding:0;margin:0;border:0\}/', $host_span_css_out )
+			&& null !== Static_Site_Importer_Provider_Layout_Overlay::validate_overlay( $host_span_row['provider_layout_overlay_css'] ?? null )
 			&& ! str_contains( $host_span_markup, 'wp:group' ),
 		'provider-container-inherits-replaced-host-wrapper-column-span-and-authored-submit-box',
 		wp_json_encode( array( 'row' => $host_span_row, 'markup' => $host_span_markup, 'css' => $host_span_css_out, 'binding' => $host_span_source['binding'] ?? null ) )
@@ -1223,6 +1225,103 @@ namespace {
 			&& in_array( 'provider_wrapper_layout_unrepresentable', array_column( $two_variant_grid_row['form_receipt_unaccepted_losses'] ?? array(), 'reason_code' ), true ),
 		'a-second-breakpoint-changing-the-track-count-again-keeps-the-wrapper-layout-decline',
 		wp_json_encode( $two_variant_grid_row )
+	);
+	$span_fact = static function ( string $id, ?string $parent, int $order, array $layout, array $properties ): array {
+		return array(
+			'id'         => $id,
+			'kind'       => 'container',
+			'parent'     => $parent,
+			'order'      => $order,
+			'source'     => array( 'tag' => 'div', 'classes' => array() ),
+			'layout'     => $layout,
+			'provenance' => array(
+				array(
+					'source_path'   => 'inline-style',
+					'source_sha256' => str_repeat( 'a', 64 ),
+					'selector'      => '[style]',
+					'condition'     => null,
+					'properties'    => $properties,
+				),
+			),
+		);
+	};
+	$span_row_form = array(
+		'selector'         => 'form.span-row',
+		'controls'         => array(
+			array( 'tag' => 'input', 'type' => 'text', 'name' => 'first', 'label' => 'First name' ),
+			array( 'tag' => 'input', 'type' => 'text', 'name' => 'last', 'label' => 'Last name' ),
+			array( 'tag' => 'textarea', 'type' => 'textarea', 'name' => 'message', 'label' => 'Message' ),
+			array( 'tag' => 'input', 'type' => 'email', 'name' => 'email', 'label' => 'Email' ),
+			array( 'tag' => 'button', 'type' => 'submit', 'label' => 'Send' ),
+		),
+		'control_topology' => array(
+			'schema'    => 'generic/form-control-topology/v1',
+			'max_depth' => 8,
+			'max_nodes' => 128,
+			'truncated' => false,
+			'nodes'     => array(
+				array( 'id' => 'wrapper-0', 'kind' => 'wrapper', 'parent' => null, 'order' => 0, 'depth' => 0, 'tag' => 'div' ),
+				array( 'id' => 'wrapper-1', 'kind' => 'wrapper', 'parent' => 'wrapper-0', 'order' => 0, 'depth' => 1, 'tag' => 'div' ),
+				array( 'id' => 'control-0', 'kind' => 'control', 'parent' => 'wrapper-1', 'order' => 0, 'depth' => 2, 'control' => 0 ),
+				array( 'id' => 'wrapper-2', 'kind' => 'wrapper', 'parent' => 'wrapper-0', 'order' => 1, 'depth' => 1, 'tag' => 'div' ),
+				array( 'id' => 'control-1', 'kind' => 'control', 'parent' => 'wrapper-2', 'order' => 0, 'depth' => 2, 'control' => 1 ),
+				array( 'id' => 'wrapper-3', 'kind' => 'wrapper', 'parent' => 'wrapper-0', 'order' => 2, 'depth' => 1, 'tag' => 'div' ),
+				array( 'id' => 'control-2', 'kind' => 'control', 'parent' => 'wrapper-3', 'order' => 0, 'depth' => 2, 'control' => 2 ),
+				array( 'id' => 'control-3', 'kind' => 'control', 'parent' => null, 'order' => 1, 'depth' => 0, 'control' => 3 ),
+				array( 'id' => 'control-4', 'kind' => 'control', 'parent' => null, 'order' => 2, 'depth' => 0, 'control' => 4 ),
+			),
+		),
+		'layout_graph'     => $v2_layout_graph(
+			array(
+				array( 'id' => 'form', 'kind' => 'container', 'parent' => null, 'order' => 0, 'source' => array( 'tag' => 'form', 'classes' => array() ), 'layout' => array(), 'provenance' => array() ),
+				array(
+					'id'         => 'wrapper-0',
+					'kind'       => 'container',
+					'parent'     => 'form',
+					'order'      => 0,
+					'source'     => array( 'tag' => 'div', 'classes' => array( 'field-row' ) ),
+					'layout'     => array( 'display' => 'grid', 'columns' => 'repeat(12, 1fr)', 'width' => '100%', 'column_gap' => 'var(--form-column-spacing, 24px)' ),
+					'provenance' => array(
+						array( 'source_path' => 'inline-style', 'source_sha256' => str_repeat( 'a', 64 ), 'selector' => '[style]', 'condition' => null, 'properties' => array( 'display', 'grid-template-columns', 'width' ) ),
+						array( 'source_path' => 'assets/form.css', 'source_sha256' => str_repeat( 'b', 64 ), 'selector' => '.field-row', 'condition' => null, 'properties' => array( 'column-gap' ) ),
+					),
+				),
+				$span_fact( 'wrapper-1', 'wrapper-0', 0, array( 'column' => '1 / span 6', 'row' => '1 / span 1' ), array( 'grid-column', 'grid-row' ) ),
+				$span_fact( 'wrapper-2', 'wrapper-0', 1, array( 'column' => '7 / span 6', 'row' => '1 / span 1' ), array( 'grid-column', 'grid-row' ) ),
+				$span_fact( 'wrapper-3', 'wrapper-0', 2, array( 'column' => '1 / span 12', 'row' => '2 / span 1' ), array( 'grid-column', 'grid-row' ) ),
+			)
+		),
+	);
+	$span_row_validated = Static_Site_Importer_Entity_Materializer_Registry::validate_forms_manifest( array( 'forms' => array( $span_row_form ) ) );
+	$span_row_row       = Static_Site_Importer_Form_Seeder::seed( array( 'forms' => $span_row_validated['forms'] ?? array() ) )['forms'][0] ?? array();
+	$span_row_markup    = (string) ( $span_row_row['block_markup'] ?? '' );
+	$span_row_css       = (string) ( $span_row_row['provider_layout_overlay_css']['css'] ?? '' );
+	$span_row_losses    = array_column( $span_row_row['computed_layout_receipt']['losses'] ?? array(), 'reason_code' );
+	$assert(
+		empty( $span_row_validated['errors'] )
+			&& 'mapped' === ( $span_row_row['status'] ?? '' )
+			&& true === ( $span_row_row['runtime_mapped'] ?? false )
+			&& ! in_array( 'provider_wrapper_layout_unrepresentable', $span_row_losses, true )
+			&& ! in_array( 'provider_wrapper_layout_unrepresentable', array_column( $span_row_row['form_receipt_unaccepted_losses'] ?? array(), 'reason_code' ), true )
+			&& in_array( 'provider_grid_span_fields', array_column( $span_row_row['computed_layout_receipt']['operations'] ?? array(), 'strategy' ), true )
+			&& 2 === substr_count( $span_row_markup, '"width":50' )
+			&& 1 === substr_count( $span_row_markup, '"width":100' )
+			&& 1 === preg_match( '/<!-- wp:jetpack\/field-text \{[^}]*"width":50\} -->\s*<div><!-- wp:jetpack\/label \{"label":"First name"\}/', $span_row_markup )
+			&& 1 === preg_match( '/<!-- wp:jetpack\/field-text \{[^}]*"width":50\} -->\s*<div><!-- wp:jetpack\/label \{"label":"Last name"\}/', $span_row_markup )
+			&& 1 === preg_match( '/<!-- wp:jetpack\/field-textarea \{[^}]*"width":100\} -->/', $span_row_markup )
+			&& 2 === preg_match_all( '/width:calc\(50% - 12px\);flex-grow:0;flex-shrink:0;flex-basis:calc\(50% - 12px\)/', $span_row_css ),
+		'twelve-column-grid-span-row-materializes-name-fields-side-by-side',
+		wp_json_encode( array( 'validation' => $span_row_validated, 'row' => $span_row_row, 'markup' => $span_row_markup, 'css' => $span_row_css ) )
+	);
+	$unclean_span_form = $span_row_form;
+	$unclean_span_form['layout_graph']['nodes'][2]['layout']['column'] = '1 / span 5';
+	$unclean_span_form['layout_graph']['nodes'][3]['layout']['column'] = '6 / span 7';
+	$unclean_span_row = Static_Site_Importer_Form_Seeder::seed( array( 'forms' => Static_Site_Importer_Entity_Materializer_Registry::validate_forms_manifest( array( 'forms' => array( $unclean_span_form ) ) )['forms'] ?? array() ) )['forms'][0] ?? array();
+	$assert(
+		'skipped' === ( $unclean_span_row['status'] ?? '' )
+			&& in_array( 'provider_wrapper_layout_unrepresentable', array_column( $unclean_span_row['form_receipt_unaccepted_losses'] ?? array(), 'reason_code' ), true ),
+		'span-that-does-not-map-to-a-jetpack-field-width-keeps-the-wrapper-layout-decline',
+		wp_json_encode( $unclean_span_row )
 	);
 	// A source that deliberately sizes two textareas differently through their own
 	// `rows` attribute - rather than an authored CSS height a cascade compiler could
@@ -2062,7 +2161,7 @@ namespace {
 			&& str_contains( $submit_preflight_css, 'padding-bottom:1rem' )
 			&& str_contains( $submit_preflight_css, 'padding-left:2rem' )
 			&& str_contains( $submit_preflight_css, 'font-weight:600' )
-			&& ! str_contains( $submit_preflight_css, 'padding:0' )
+			&& ! str_contains( $submit_preflight_css, '> .wp-block-button__link{padding:0' )
 			&& ! str_contains( $submit_preflight_css, 'font-weight:inherit' )
 			&& str_contains( $submit_preflight_css, 'background-color:oklch(0.2689 0.0057 156.83)' ),
 		'authored-submit-style-wins-over-cascade-preflight-padding-and-weight-resets',
@@ -2113,6 +2212,14 @@ namespace {
 		'captured-form-container-padding-reaches-the-rendered-page-alongside-a-captured-field-wrapper',
 		wp_json_encode( array( 'css' => $container_padding_css, 'validation' => $validated_container_padding ) )
 	);
+	$assert(
+		preg_match( '/\.ssi-form-[a-f0-9]{12}\.jetpack-contact-form-container\{padding:0;margin:0;border:0\}/', $container_padding_css )
+			&& preg_match( '/\.ssi-form-[a-f0-9]{12}\.ssi-form-[a-f0-9]{12}\.jetpack-contact-form-container\{padding:36px\}/', $container_padding_css )
+			&& ! preg_match( '/\.ssi-form-[a-f0-9]{12}\.ssi-form-[a-f0-9]{12}\.jetpack-contact-form-container\{padding:0/', $container_padding_css )
+			&& ! str_contains( $container_padding_css, 'padding:0!important' ),
+		'provider-container-box-reset-is-lower-priority-than-authored-container-padding',
+		$container_padding_css
+	);
 	// A provider select is a wrapper nest: Jetpack parks input className on
 	// `.contact-form__select-wrapper` and paints that wrapper, then independently
 	// pads the nested `<select>`. The authored box must resolve to one node, the
@@ -2155,8 +2262,8 @@ namespace {
 			&& str_contains( $select_inner_rule, 'background:#fff' )
 			&& ! str_contains( $select_inner_rule, 'width:100%' )
 			&& str_contains( $select_wrapper_rule, 'width:100%' )
-			&& str_contains( $select_wrapper_rule, 'padding:0' )
-			&& str_contains( $select_wrapper_rule, 'border:0' )
+			&& str_contains( $select_wrapper_rule, 'padding:0!important' )
+			&& str_contains( $select_wrapper_rule, 'border:0!important' )
 			&& ! str_contains( $select_wrapper_rule, 'padding:12px 16px' )
 			&& ! str_contains( $select_wrapper_rule, 'border:1px solid #ccc' ),
 		'authored-select-box-reaches-the-nested-control-once-and-width-stays-on-the-wrapper',
@@ -2210,7 +2317,7 @@ namespace {
 	}
 	$assert( '0' === ( $phone_destinations[0]['resets']['text-indent'] ?? null ) && '0' === ( $phone_destinations[0]['resets']['gap'] ?? null ) && str_contains( $phone_presentation_css, 'text-indent:0!important' ) && str_contains( $phone_presentation_css, 'gap:0!important' ) && str_contains( $phone_presentation_css, 'text-indent:4px!important' ), 'phone-text-indentation-belongs-to-value-not-structural-prefix-container' );
 	$assert( null !== Static_Site_Importer_Provider_Layout_Overlay::validate_overlay( $phone_presentation_row['provider_layout_overlay_css'] ?? array() ), 'composite-provider-destination-overlay-survives-stylesheet-admission' );
-	$assert( empty( $validated_phone_presentation['errors'] ) && 4 === count( $phone_destinations ) && empty( $phone_destinations[0]['properties'] ) && str_contains( (string) ( $phone_destinations[1]['selector'] ?? '' ), '-destination-primary' ) && str_contains( (string) ( $phone_destinations[3]['selector'] ?? '' ), '-destination-prefix' ) && 'flex' === ( $phone_destinations[3]['resets']['display'] ?? null ) && 'center' === ( $phone_destinations[3]['resets']['align-items'] ?? null ) && '100%' === ( $phone_destinations[3]['resets']['height'] ?? null ) && str_contains( $phone_presentation_css, 'background-color:#fff!important' ) && str_contains( $phone_presentation_css, 'border-color:#1e4b6e!important' ) && str_contains( $phone_presentation_css, 'padding-block-start:8px!important' ) && str_contains( $phone_presentation_css, 'padding-inline-end:8px!important' ) && str_contains( $phone_presentation_css, 'padding:0!important;border:0!important;background:transparent!important;text-indent:0!important;gap:0!important' ) && str_contains( $phone_presentation_css, 'display:flex!important;align-items:center!important;height:100%!important' ), 'phone-presentation-keeps-input-styles-on-value-and-neutralizes-provider-added-shell', wp_json_encode( array( 'css' => $phone_presentation_css, 'target' => $phone_presentation_target ) ) );
+	$assert( empty( $validated_phone_presentation['errors'] ) && 4 === count( $phone_destinations ) && empty( $phone_destinations[0]['properties'] ) && str_contains( (string) ( $phone_destinations[1]['selector'] ?? '' ), '-destination-primary' ) && 'revert' === ( $phone_destinations[1]['resets']['font-family'] ?? null ) && 'revert' === ( $phone_destinations[1]['resets']['line-height'] ?? null ) && str_contains( (string) ( $phone_destinations[3]['selector'] ?? '' ), '-destination-prefix' ) && 'flex' === ( $phone_destinations[3]['resets']['display'] ?? null ) && 'center' === ( $phone_destinations[3]['resets']['align-items'] ?? null ) && '100%' === ( $phone_destinations[3]['resets']['height'] ?? null ) && str_contains( $phone_presentation_css, 'background-color:#fff!important' ) && str_contains( $phone_presentation_css, 'border-color:#1e4b6e!important' ) && str_contains( $phone_presentation_css, 'padding-block-start:8px!important' ) && str_contains( $phone_presentation_css, 'padding-inline-end:8px!important' ) && str_contains( $phone_presentation_css, 'font-family:revert!important' ) && str_contains( $phone_presentation_css, 'padding:0!important;border:0!important;background:transparent!important;text-indent:0!important;gap:0!important' ) && str_contains( $phone_presentation_css, 'display:flex!important;align-items:center!important;height:100%!important' ), 'phone-presentation-keeps-input-styles-on-value-and-neutralizes-provider-added-shell', wp_json_encode( array( 'css' => $phone_presentation_css, 'target' => $phone_presentation_target ) ) );
 	$assert( 4 === count( $phone_destination_hooks ) && empty( array_filter( $phone_destination_hooks, static fn( string $hook ): bool => ! str_contains( $phone_markup, $hook ) ) ), 'phone-markup-hooks-and-overlay-destinations-share-one-prepared-calculation', wp_json_encode( array( 'markup' => $phone_markup, 'hooks' => $phone_destination_hooks ) ) );
 	$whitespace_phone_presentation                            = $phone_presentation;
 	$whitespace_phone_presentation['forms'][0]['controls'][0]['type'] = ' tel ';

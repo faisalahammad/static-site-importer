@@ -173,7 +173,7 @@ if ( ! function_exists( 'plugin_dir_url' ) ) {
 }
 
 if ( ! function_exists( 'add_action' ) ) {
-	function add_action( string $hook, callable|string $callback ): void {
+	function add_action( string $hook, callable|string|array $callback, int $priority = 10, int $accepted_args = 1 ): void {
 		$GLOBALS['ssi_companion_actions'][ $hook ][] = $callback;
 	}
 }
@@ -623,8 +623,10 @@ if ( is_array( $descriptor ) ) {
 	$assert( str_contains( $main, 'wp_enqueue_script' ), 'main-file-enqueues-island-js' );
 	$assert( str_contains( $main, "require_once __DIR__ . '/includes/provider-form-runtime-v1.php'" ) && str_contains( $main, 'SSI_EXAMPLE_SITE_Provider_Form_Runtime_V1::register();' ), 'main-file-registers-versioned-companion-provider-form-runtime' );
 	$assert( str_contains( $main, "require_once __DIR__ . '/includes/internal-link-runtime.php'" ) && str_contains( $main, 'SSI_EXAMPLE_SITE_Internal_Link_Runtime::register();' ), 'main-file-registers-companion-internal-link-runtime' );
+	$assert( str_contains( $main, "require_once __DIR__ . '/includes/source-route-redirect.php'" ) && str_contains( $main, 'SSI_EXAMPLE_SITE_Source_Route_Redirect::register();' ), 'main-file-registers-companion-source-route-redirect' );
 	$assert( isset( $files['ssi-example-site/includes/provider-form-runtime-v1.php'] ) && str_contains( $files['ssi-example-site/includes/provider-form-runtime-v1.php'], 'final class SSI_EXAMPLE_SITE_Provider_Form_Runtime_V1' ), 'provider-form-runtime-is-emitted-under-companion-namespace' );
 	$assert( isset( $files['ssi-example-site/includes/internal-link-runtime.php'] ) && str_contains( $files['ssi-example-site/includes/internal-link-runtime.php'], 'final class SSI_EXAMPLE_SITE_Internal_Link_Runtime' ), 'internal-link-runtime-is-emitted-under-companion-namespace' );
+	$assert( isset( $files['ssi-example-site/includes/source-route-redirect.php'] ) && str_contains( $files['ssi-example-site/includes/source-route-redirect.php'], 'final class SSI_EXAMPLE_SITE_Source_Route_Redirect' ) && ! str_contains( $files['ssi-example-site/includes/source-route-redirect.php'], 'Static_Site_Importer_Source_Route_Redirect' ), 'source-route-redirect-is-emitted-under-companion-namespace' );
 	$config = json_decode( (string) ( $files['ssi-example-site/companion.json'] ?? '' ), true );
 	$assert( is_array( $config ) && 'Example Site' === ( $config['site_name'] ?? '' ) && array( 'custom-hero' ) === ( $config['block_directories'] ?? null ) && 'ssi-example-site/ssi-example-site.php' === ( $config['plugin_file'] ?? '' ), 'companion-config-contains-imported-runtime-data' );
 	$assert( str_contains( $main, "companion.json" ) && ! str_contains( $main, "'custom-hero'" ) && ! str_contains( $main, "'ssi-example-site-editor'" ), 'main-file-reads-runtime-data-from-json' );
@@ -680,6 +682,17 @@ if ( is_array( $descriptor ) ) {
 	foreach ( array( '<svg viewBox="0 0 100 100" width="100" height="100" role="img" aria-label="Route map">', '<path d="M0 0 L100 100" stroke="black" fill="none">', '<circle cx="50" cy="50" r="5" fill="red">' ) as $fragment ) {
 		$assert( str_contains( $svg_output, $fragment ), 'editable-render-preserves-inline-svg-' . $fragment, $svg_output );
 	}
+
+	// A closed disclosure must survive the boundary. KSES strips a disallowed
+	// tag but keeps its children, so a missing <details>/<summary> entry
+	// unrolls the closed disclosure and its hidden dialog body flows into the
+	// tile layout, clipping the sibling imagery below the fold (#1840).
+	$disclosure_markup = '<div style="position:relative;width:200px;height:200px;overflow:hidden"><details class="dla-disclosure"><summary aria-label="open">Gallery item</summary><div class="dla-dialog" style="height:500px">viewer</div></details><img src="https://example.test/a.jpg" width="200" height="200" alt=""></div>';
+	$disclosure_output = $render_frontend( $render, array( 'content' => $disclosure_markup ) );
+	foreach ( array( '<details class="dla-disclosure">', '<summary aria-label="open">Gallery item</summary>', '<div class="dla-dialog" style="height:500px">viewer</div>', '</details>', '<img src="https://example.test/a.jpg" width="200" height="200" alt="">' ) as $disclosure_fragment ) {
+		$assert( str_contains( $disclosure_output, $disclosure_fragment ), 'editable-render-preserves-closed-disclosure-wrappers', $disclosure_output );
+	}
+	$assert( ! str_contains( $disclosure_output, 'open=' ), 'editable-render-leaves-closed-disclosure-closed', $disclosure_output );
 
 	// A picture carried only by an inline background must survive the boundary.
 	// WordPress core's safecss_filter_attr() has no allowance for image-set(),
@@ -983,6 +996,19 @@ if ( is_array( $typed_descriptor ) ) {
 	$event_bearing_media_output = (string) ob_get_clean();
 	$assert( str_contains( $event_bearing_media_output, '<img src="safe-hero.avif" alt="Hero" fetchpriority="high">' ), 'typed-renderer-preserves-safe-media-inside-event-bearing-wrapper', $event_bearing_media_output );
 	$assert( ! str_contains( strtolower( $event_bearing_media_output ), 'onload' ) && ! str_contains( $event_bearing_media_output, '<wow-image' ), 'typed-renderer-removes-event-bearing-custom-wrapper', $event_bearing_media_output );
+	// Clip paths and masks carry their coordinate system on the element. Without
+	// clipPathUnits/maskUnits an objectBoundingBox shape (0-1 coordinates) is
+	// read in user space and the clipped section collapses to about one pixel.
+	$attributes = array(
+		'kind'    => 'media',
+		'content' => '<svg width="0" height="0" aria-hidden="true"><defs><clipPath id="wave" clipPathUnits="objectBoundingBox" transform="scale(1 -1) translate(0 -1)"><path d="M0,0 H1 V0.9 C0.75,1 0.25,0.8 0,0.9 Z"></path></clipPath><mask id="fade" maskUnits="objectBoundingBox" maskContentUnits="objectBoundingBox" x="0" y="0" width="1" height="1"><rect width="1" height="1" fill="white"></rect></mask></defs></svg><img src="hero.jpg" alt="" style="clip-path:url(#wave)">',
+	);
+	ob_start();
+	eval( '?>' . $typed_render );
+	$clip_geometry_output = strtolower( (string) ob_get_clean() );
+	foreach ( array( 'clippathunits="objectboundingbox"', 'transform="scale(1 -1) translate(0 -1)"', 'maskunits="objectboundingbox"', 'maskcontentunits="objectboundingbox"', 'x="0" y="0" width="1" height="1"' ) as $fragment ) {
+		$assert( str_contains( $clip_geometry_output, $fragment ), 'typed-renderer-preserves-clip-and-mask-geometry-' . $fragment, $clip_geometry_output );
+	}
 	$attributes = array(
 		'kind'    => 'media',
 		'content' => '<div class="masked-video"><svg viewBox="0 0 100 40"><defs><clipPath id="media-mask"><text x="0" y="20">Play</text></clipPath></defs></svg><video src="footer.mp4" autoplay muted loop style="clip-path:url(#media-mask)"></video></div>',
@@ -1072,8 +1098,10 @@ $assert( file_exists( WP_PLUGIN_DIR . '/ssi-example-site/blocks/custom-hero/inde
 $assert( file_exists( WP_PLUGIN_DIR . '/ssi-example-site/editor/core-enhancement.js' ) && 'window.ssiExampleEditor = true;' === (string) file_get_contents( WP_PLUGIN_DIR . '/ssi-example-site/editor/core-enhancement.js' ), 'install-writes-editor-script-asset' );
 $assert( file_exists( WP_PLUGIN_DIR . '/ssi-example-site/includes/provider-form-runtime-v1.php' ), 'install-writes-versioned-companion-provider-form-runtime' );
 $assert( file_exists( WP_PLUGIN_DIR . '/ssi-example-site/includes/internal-link-runtime.php' ), 'install-writes-companion-internal-link-runtime' );
+$assert( file_exists( WP_PLUGIN_DIR . '/ssi-example-site/includes/source-route-redirect.php' ), 'install-writes-companion-source-route-redirect' );
 $assert( isset( $GLOBALS['ssi_companion_registered_filters']['grunion_contact_form_field_html'], $GLOBALS['ssi_companion_registered_filters']['render_block_jetpack/contact-form'], $GLOBALS['ssi_companion_registered_filters']['render_block_core/button'] ), 'installed-companion-registers-provider-form-runtime-hooks' );
 $assert( isset( $GLOBALS['ssi_companion_registered_filters']['the_content'] ), 'installed-companion-registers-internal-link-runtime' );
+$assert( isset( $GLOBALS['ssi_companion_actions']['template_redirect'] ), 'installed-companion-registers-source-route-redirect' );
 $submit_filter = $GLOBALS['ssi_companion_registered_filters']['render_block_core/button'][0][0] ?? null;
 $projected_submit = is_callable( $submit_filter ) ? call_user_func(
 	$submit_filter,
@@ -1091,7 +1119,7 @@ class WP_Block_Type {
 }
 function plugin_dir_path( string $file ): string { return dirname( $file ) . '/'; }
 function plugin_dir_url( string $file ): string { return 'https://example.test/plugins/' . basename( dirname( $file ) ) . '/'; }
-function add_action( string $hook, callable|string $callback ): void { if ( 'init' === $hook ) { call_user_func( $callback ); } }
+function add_action( string $hook, callable|string|array $callback, int $priority = 10, int $accepted_args = 1 ): void { if ( 'init' === $hook ) { call_user_func( $callback ); } }
 function add_filter( string $hook, callable|string $callback, int $priority = 10, int $accepted_args = 1 ): void {}
 function register_block_type( string $path, array $args = array() ): WP_Block_Type|false {
 	$metadata = is_file( $path . '/block.json' ) ? json_decode( (string) file_get_contents( $path . '/block.json' ), true ) : array();
@@ -1126,7 +1154,7 @@ define( 'ABSPATH', __DIR__ . '/' );
 class WP_Block_Type { public function __construct( public string $name ) {} }
 function plugin_dir_path( string $file ): string { return dirname( $file ) . '/'; }
 function plugin_dir_url( string $file ): string { return 'https://example.test/plugins/' . basename( dirname( $file ) ) . '/'; }
-function add_action( string $hook, callable|string $callback ): void { if ( 'init' === $hook ) { call_user_func( $callback ); } }
+function add_action( string $hook, callable|string|array $callback, int $priority = 10, int $accepted_args = 1 ): void { if ( 'init' === $hook ) { call_user_func( $callback ); } }
 function add_filter( string $hook, callable|string $callback, int $priority = 10, int $accepted_args = 1 ): void { $GLOBALS['filters'][ $hook ][] = $callback; }
 function register_block_type( string $path, array $args = array() ): WP_Block_Type|false { return new WP_Block_Type( 'test/block' ); }
 function get_option( string $name, mixed $default = false ): mixed { return $default; }

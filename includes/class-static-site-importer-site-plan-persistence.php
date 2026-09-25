@@ -16,8 +16,14 @@ if ( ! class_exists( 'Static_Site_Importer_Public_Error_Projection' ) ) {
 if ( ! class_exists( 'Static_Site_Importer_Build_Provenance' ) ) {
 	require_once __DIR__ . '/class-static-site-importer-build-provenance.php';
 }
+if ( ! class_exists( 'Static_Site_Importer_Rewrite_Base_Collision' ) ) {
+	require_once __DIR__ . '/class-static-site-importer-rewrite-base-collision.php';
+}
 if ( ! class_exists( 'Static_Site_Importer_Internal_Link_Runtime' ) ) {
 	require_once __DIR__ . '/class-static-site-importer-internal-link-runtime.php';
+}
+if ( ! class_exists( 'Static_Site_Importer_Source_Route_Redirect' ) ) {
+	require_once __DIR__ . '/class-static-site-importer-source-route-redirect.php';
 }
 
 /** Writes posts, files, overlays, and journals for a prepared plan. */
@@ -114,6 +120,10 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 			if ( ! self::write_post_meta( $post, '_static_site_importer_provenance', (string) wp_json_encode( $provenance ) ) ) {
 				return self::failed_receipt( $state, 'materialization_provenance_metadata_write_failed' );
 			}
+			$source_route = Static_Site_Importer_Source_Route_Redirect::public_source_route( (string) $page['source_path'] );
+			if ( '' !== $source_route && ! self::write_post_meta( $post, Static_Site_Importer_Source_Route_Redirect::META_KEY, $source_route ) ) {
+				return self::failed_receipt( $state, 'materialization_source_route_metadata_write_failed' );
+			}
 			foreach ( $state['applied']['runtime_declarations']['entity_bindings'] as &$binding_report ) {
 				if ( ( $binding_report['source_path'] ?? '' ) === $page['source_path'] ) {
 					$fragment          = (string) ( $binding_report['replacement_block_markup'] ?? '' );
@@ -133,6 +143,9 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 		$route_links = self::rewrite_materialized_route_links( $state );
 		if ( is_wp_error( $route_links ) ) {
 			return self::failed_receipt_from_error( $state, $route_links );
+		}
+		if ( ! self::keep_page_routes_reachable( $state ) ) {
+			return self::failed_receipt( $state, 'rewrite_base_not_applied' );
 		}
 
 		$short_write_attempt = 0;
@@ -199,6 +212,11 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 		if ( is_wp_error( $publications ) ) {
 			return self::failed_receipt( $state, $publications->get_error_code() );
 		}
+		$media_library = Static_Site_Importer_Media_Library_Materializer::materialize( $state );
+		if ( is_wp_error( $media_library ) ) {
+			return self::failed_receipt_from_error( $state, $media_library );
+		}
+		$state['applied']['media_library'] = $media_library;
 		$font_materialization = self::apply_font_overlay( $state, $font_overlay );
 		if ( is_wp_error( $font_materialization ) ) {
 			return self::failed_receipt_from_error( $state, $font_materialization );
@@ -1442,19 +1460,57 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 		) : array( 'exists' => false );
 	}
 
-	/** Snapshot all runtime state this materializer can mutate before activation. */
-	public static function journal_runtime( array &$state ): void {
-		foreach ( array( 'stylesheet', 'template', 'show_on_front', 'page_on_front', 'use_smilies', 'blogname' ) as $option ) {
-			if ( isset( $state['rollback']['options'][ $option ] ) ) {
-				continue;
+	/** Move core rewrite bases that would route an imported page path to an archive. */
+	public static function keep_page_routes_reachable( array &$state ): bool {
+		// Without a rewrite engine there are no pretty routes to shadow.
+		if ( ! ( $GLOBALS['wp_rewrite'] ?? null ) instanceof WP_Rewrite ) {
+			return true;
+		}
+		$paths = array();
+		foreach ( $state['applied']['posts'] as $post ) {
+			if ( 'page' === get_post_type( (int) $post['id'] ) ) {
+				$paths[] = trim( (string) get_page_uri( (int) $post['id'] ), '/' );
 			}
-			$missing                                 = '__static_site_importer_missing_' . $option . '__';
-			$value                                   = get_option( $option, $missing );
-			$state['rollback']['options'][ $option ] = array(
-				'exists' => $value !== $missing,
-				'value'  => $value,
+		}
+		$moves = Static_Site_Importer_Rewrite_Base_Collision::planned_moves( $paths );
+		foreach ( $moves as $move ) {
+			self::journal_option( $state, $move['option'] );
+		}
+		if ( ! Static_Site_Importer_Rewrite_Base_Collision::apply( $moves ) ) {
+			return false;
+		}
+		foreach ( $moves as $taxonomy => $move ) {
+			$state['applied']['operations'][] = array(
+				'kind'        => 'move_rewrite_base',
+				'reason_code' => 'imported_page_route_collision',
+				'taxonomy'    => $taxonomy,
+				'option'      => $move['option'],
+				'from'        => $move['from'],
+				'to'          => $move['to'],
 			);
 		}
+		array_push( $state['diagnostics'], ...Static_Site_Importer_Rewrite_Base_Collision::shadowed_route_diagnostics( $paths ) );
+		return true;
+	}
+
+	/** Snapshot all runtime state this materializer can mutate before activation. */
+	public static function journal_runtime( array &$state ): void {
+		foreach ( array( 'stylesheet', 'template', 'show_on_front', 'page_on_front', 'use_smilies', 'blogname', 'site_icon' ) as $option ) {
+			self::journal_option( $state, $option );
+		}
+	}
+
+	/** Snapshot one option's pre-import value once, for rollback. */
+	public static function journal_option( array &$state, string $option ): void {
+		if ( isset( $state['rollback']['options'][ $option ] ) ) {
+			return;
+		}
+		$missing                                 = '__static_site_importer_missing_' . $option . '__';
+		$value                                   = get_option( $option, $missing );
+		$state['rollback']['options'][ $option ] = array(
+			'exists' => $value !== $missing,
+			'value'  => $value,
+		);
 	}
 
 	public static function write_option( string $option, mixed $value ): bool {
@@ -1545,6 +1601,16 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 				self::record_rollback_failure( $state, 'file', (string) $path, $error );
 			}
 		}
+		foreach ( array_reverse( $state['applied']['attachments'] ?? array() ) as $attachment_id ) {
+			try {
+				if ( function_exists( 'wp_delete_attachment' ) && ! wp_delete_attachment( (int) $attachment_id, true ) ) {
+					throw new RuntimeException( 'materialization_rollback_attachment_delete_failed' );
+				}
+			} catch ( Throwable $error ) {
+				self::record_rollback_failure( $state, 'post', (string) $attachment_id, $error );
+			}
+		}
+		$state['applied']['attachments'] = array();
 		foreach ( array_reverse( $state['applied']['posts'] ?? array() ) as $applied ) {
 			$id     = (int) ( $applied['id'] ?? 0 );
 			$before = $state['rollback']['posts'][ $id ] ?? $state['rollback']['posts'][ 'new:' . (string) ( $applied['source_path'] ?? '' ) ] ?? null;
@@ -1603,6 +1669,9 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 			} catch ( Throwable $error ) {
 				self::record_rollback_failure( $state, 'option', (string) $option, $error );
 			}
+		}
+		if ( isset( $options['category_base'] ) || isset( $options['tag_base'] ) ) {
+			delete_option( 'rewrite_rules' );
 		}
 	}
 
