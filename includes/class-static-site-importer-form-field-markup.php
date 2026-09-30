@@ -509,16 +509,24 @@ final class Static_Site_Importer_Form_Field_Markup {
 	public static function context_blocks( array $form, string $position ): array {
 		$context = isset( $form['form'][ $position ] ) && is_array( $form['form'][ $position ] ) ? $form['form'][ $position ] : array();
 		$blocks  = array();
-		foreach ( $context as $block ) {
+		foreach ( $context as $index => $block ) {
 			if ( ! is_array( $block ) || ! is_string( $block['text'] ?? null ) || '' === trim( $block['text'] ) ) {
 				continue;
 			}
 			if ( 'heading' === ( $block['type'] ?? null ) ) {
-				$level = min( 6, max( 1, (int) ( $block['level'] ?? 2 ) ) );
-				$attrs = 2 === $level ? array() : array( 'level' => $level );
-				$class = isset( $block['class'] ) && is_scalar( $block['class'] ) ? trim( (string) $block['class'] ) : '';
+				$level  = min( 6, max( 1, (int) ( $block['level'] ?? 2 ) ) );
+				$attrs  = 2 === $level ? array() : array( 'level' => $level );
+				$class  = isset( $block['class'] ) && is_scalar( $block['class'] ) ? trim( (string) $block['class'] ) : '';
+				$styles = is_array( $block['styles'] ?? null ) ? $block['styles'] : array();
+				if ( '' !== $class && ! empty( $styles ) ) {
+					$class .= ' ' . self::context_style_identity( $position, (int) $index, $block );
+				}
 				if ( '' !== $class ) {
 					$attrs['className'] = $class;
+				}
+				$style = '' === trim( (string) ( $block['class'] ?? '' ) ) ? self::block_style_attributes( $styles ) : array();
+				if ( array() !== $style ) {
+					$attrs['style'] = $style;
 				}
 				$blocks[] = array(
 					'name'    => 'core/heading',
@@ -527,14 +535,96 @@ final class Static_Site_Importer_Form_Field_Markup {
 					'content' => $block['text'],
 				);
 			} elseif ( 'paragraph' === ( $block['type'] ?? null ) ) {
+				$attrs  = array();
+				$class  = isset( $block['class'] ) && is_scalar( $block['class'] ) ? trim( (string) $block['class'] ) : '';
+				$styles = is_array( $block['styles'] ?? null ) ? $block['styles'] : array();
+				if ( '' !== $class && ! empty( $styles ) ) {
+					$class .= ' ' . self::context_style_identity( $position, (int) $index, $block );
+				}
+				if ( '' !== $class ) {
+					$attrs['className'] = $class;
+				}
+				$style = '' === trim( (string) ( $block['class'] ?? '' ) ) ? self::block_style_attributes( $styles ) : array();
+				if ( array() !== $style ) {
+					$attrs['style'] = $style;
+				}
 				$blocks[] = array(
 					'name'    => 'core/paragraph',
+					'attrs'   => $attrs,
 					'wrapper' => 'paragraph',
 					'content' => $block['text'],
 				);
 			}
 		}
 		return $blocks;
+	}
+
+	/** @return array<int,array{identity:string,styles:array<string,string>}> */
+	public static function context_style_fallbacks( array $form ): array {
+		$fallbacks = array();
+		foreach ( array( 'context_before', 'context_after' ) as $position ) {
+			foreach ( $form[ $position ] ?? array() as $index => $block ) {
+				$class  = is_array( $block ) && is_string( $block['class'] ?? null ) ? trim( $block['class'] ) : '';
+				$styles = is_array( $block['styles'] ?? null ) ? $block['styles'] : array();
+				if ( '' !== $class && ! empty( $styles ) ) {
+					$fallbacks[] = array(
+						'identity'    => self::context_style_identity( $position, (int) $index, $block ),
+						'tag'         => 'heading' === ( $block['type'] ?? null ) ? 'h' . min( 6, max( 1, (int) ( $block['level'] ?? 2 ) ) ) : 'p',
+						'owner_class' => (string) ( preg_split( '/\s+/', $class )[0] ?? '' ),
+						'styles'      => $styles,
+					);
+				}
+			}
+		}
+		return $fallbacks;
+	}
+
+	private static function context_style_identity( string $position, int $index, array $block ): string {
+		$fingerprint = array_intersect_key( $block, array_flip( array( 'type', 'level', 'text', 'class', 'styles' ) ) );
+		return 'ssi-context-' . substr( hash( 'sha256', $position . "\n" . $index . "\n" . (string) wp_json_encode( $fingerprint ) ), 0, 12 );
+	}
+
+	/**
+	 * Map a context item's validated computed presentation onto the block
+	 * style attributes core's own save renders as inline declarations.
+	 *
+	 * Only the keys the contract admits travel here, so the emitted
+	 * `style.typography.*` / `style.color.text` values are exactly the ones
+	 * the saved element carries.
+	 *
+	 * @param mixed $styles Validated context styles.
+	 * @return array<string,mixed>
+	 */
+	private static function block_style_attributes( mixed $styles ): array {
+		if ( ! is_array( $styles ) ) {
+			return array();
+		}
+		$typography = array();
+		foreach (
+			array(
+				'font_family'    => 'fontFamily',
+				'font_size'      => 'fontSize',
+				'font_style'     => 'fontStyle',
+				'font_weight'    => 'fontWeight',
+				'letter_spacing' => 'letterSpacing',
+				'line_height'    => 'lineHeight',
+				'text_transform' => 'textTransform',
+			) as $key => $attribute
+		) {
+			$value = isset( $styles[ $key ] ) && is_scalar( $styles[ $key ] ) ? trim( (string) $styles[ $key ] ) : '';
+			if ( '' !== $value ) {
+				$typography[ $attribute ] = $value;
+			}
+		}
+		$style = array();
+		$color = isset( $styles['color'] ) && is_scalar( $styles['color'] ) ? trim( (string) $styles['color'] ) : '';
+		if ( '' !== $color ) {
+			$style['color'] = array( 'text' => $color );
+		}
+		if ( array() !== $typography ) {
+			$style['typography'] = $typography;
+		}
+		return $style;
 	}
 
 	/** Serialize in-form context as editable core blocks. */
@@ -701,13 +791,11 @@ final class Static_Site_Importer_Form_Field_Markup {
 			$prefix  = "\n<div class=\"" . self::escape_attribute( $classes ) . '"><button type="' . $type . '" class="wp-block-button__link wp-element-button">' . $icon . self::rich_text_markup( $content, $label ) . "</button></div>\n";
 		} elseif ( 'heading' === $wrapper ) {
 			$level   = min( 6, max( 1, (int) ( $attrs['level'] ?? 2 ) ) );
-			$classes = 'wp-block-heading';
-			if ( isset( $attrs['className'] ) && is_scalar( $attrs['className'] ) && '' !== trim( (string) $attrs['className'] ) ) {
-				$classes .= ' ' . trim( (string) $attrs['className'] );
-			}
-			$prefix = "\n<h" . $level . ' class="' . self::escape_attribute( $classes ) . '">' . self::rich_text_markup( $content ) . '</h' . $level . ">\n";
+			$classes = self::saved_element_classes( $attrs, array( 'wp-block-heading', is_scalar( $attrs['className'] ?? null ) ? trim( (string) $attrs['className'] ) : '' ) );
+			$prefix  = "\n<h" . $level . ' class="' . self::escape_attribute( $classes ) . '"' . self::inline_style_attribute( $attrs['style'] ?? null ) . '>' . self::rich_text_markup( $content ) . '</h' . $level . ">\n";
 		} elseif ( 'paragraph' === $wrapper ) {
-			$prefix = "\n<p>" . self::rich_text_markup( $content ) . "</p>\n";
+			$classes = self::saved_element_classes( $attrs, is_scalar( $attrs['className'] ?? null ) && '' !== trim( (string) $attrs['className'] ) ? array( 'wp-block-paragraph', trim( (string) $attrs['className'] ) ) : array() );
+			$prefix  = "\n<p" . ( '' !== $classes ? ' class="' . self::escape_attribute( $classes ) . '"' : '' ) . self::inline_style_attribute( $attrs['style'] ?? null ) . '>' . self::rich_text_markup( $content ) . "</p>\n";
 		} elseif ( 'group' === $wrapper ) {
 			$classes = 'wp-block-group' . ( ! empty( $attrs['className'] ) ? ' ' . $attrs['className'] : '' );
 			if ( 'flex' === ( $attrs['layout']['type'] ?? '' ) ) {
@@ -809,6 +897,77 @@ final class Static_Site_Importer_Form_Field_Markup {
 	 */
 	private static function escape_attribute( string $value ): string {
 		return htmlspecialchars( $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' );
+	}
+
+	/**
+	 * The class list a block's saved element carries.
+	 *
+	 * A captured text color is authored as `style.color.text`, and the
+	 * registered block's own save answers it with the `has-text-color`
+	 * support class beside the inline declaration; the class list is built
+	 * in the same order that save emits it.
+	 *
+	 * @param array<string,mixed>     $attrs          Block attributes.
+	 * @param array<int,string>       $base_classes   Classes the saved element always carries.
+	 * @return string
+	 */
+	private static function saved_element_classes( array $attrs, array $base_classes ): string {
+		if ( self::style_has_text_color( $attrs['style'] ?? null ) ) {
+			$base_classes[] = 'has-text-color';
+		}
+		return trim( implode( ' ', array_filter( $base_classes, static fn ( string $class_name ): bool => '' !== trim( $class_name ) ) ) );
+	}
+
+	/** @param mixed $style */
+	private static function style_has_text_color( mixed $style ): bool {
+		return is_array( $style ) && is_array( $style['color'] ?? null ) && isset( $style['color']['text'] ) && is_scalar( $style['color']['text'] ) && '' !== trim( (string) $style['color']['text'] );
+	}
+
+	/**
+	 * The saved `style` attribute for a block style object.
+	 *
+	 * The declarations and their order are exactly the ones WordPress's own
+	 * save renders for `style.color.text` and `style.typography.*`, so the
+	 * stored markup stays what the editor would regenerate and the block
+	 * remains valid. Without admitted declarations there is no attribute,
+	 * keeping the earlier, attribute-free saved markup unchanged.
+	 *
+	 * @param mixed $style Block style object.
+	 */
+	private static function inline_style_attribute( mixed $style ): string {
+		if ( ! is_array( $style ) ) {
+			return '';
+		}
+		$declarations = array();
+		if ( self::style_has_text_color( $style ) ) {
+			$declarations['color'] = trim( (string) $style['color']['text'] );
+		}
+		$typography = is_array( $style['typography'] ?? null ) ? $style['typography'] : array();
+		foreach (
+			array(
+				'fontFamily'    => 'font-family',
+				'fontSize'      => 'font-size',
+				'fontStyle'     => 'font-style',
+				'fontWeight'    => 'font-weight',
+				'letterSpacing' => 'letter-spacing',
+				'lineHeight'    => 'line-height',
+				'textTransform' => 'text-transform',
+			) as $attribute => $property
+		) {
+			$value = isset( $typography[ $attribute ] ) && is_scalar( $typography[ $attribute ] ) ? trim( (string) $typography[ $attribute ] ) : '';
+			if ( '' !== $value ) {
+				$declarations[ $property ] = $value;
+			}
+		}
+		if ( array() === $declarations ) {
+			return '';
+		}
+		$rendered = array_map(
+			static fn ( string $property, string $value ): string => $property . ':' . self::escape_attribute( $value ),
+			array_keys( $declarations ),
+			$declarations
+		);
+		return ' style="' . implode( ';', $rendered ) . '"';
 	}
 
 	/**

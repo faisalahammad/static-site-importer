@@ -91,8 +91,10 @@ function wp_json_encode( $value, int $options = 0 ) {
 		$GLOBALS['ssi_plan_json_array_calls'] = (int) ( $GLOBALS['ssi_plan_json_array_calls'] ?? 0 ) + 1;
 	}
 	return json_encode( $value, $options ); }
-function wp_slash( string $value ): string {
-	return addslashes( $value ); }
+function wp_slash( $value ) {
+	return is_array( $value ) ? array_map( 'wp_slash', $value ) : ( is_string( $value ) ? addslashes( $value ) : $value ); }
+function wp_unslash( $value ) {
+	return is_array( $value ) ? array_map( 'wp_unslash', $value ) : ( is_string( $value ) ? stripslashes( $value ) : $value ); }
 function wp_mkdir_p( string $path ): bool {
 	return is_dir( $path ) || mkdir( $path, 0777, true ); }
 function WP_Filesystem(): bool {
@@ -219,7 +221,7 @@ function get_post( int $id, $output = OBJECT ) {
 	if ( ! isset( $GLOBALS['ssi_plan_posts'][ $id ] ) ) {
 		return null;
 	}
-	return ARRAY_A === $output ? array_merge( array( 'ID' => $id ), $GLOBALS['ssi_plan_posts'][ $id ] ) : new WP_Post( $id );
+	return ARRAY_A === $output ? wp_unslash( array_merge( array( 'ID' => $id ), $GLOBALS['ssi_plan_posts'][ $id ] ) ) : new WP_Post( $id );
 }
 function wp_insert_post( array $post, bool $wp_error ) {
 	++$GLOBALS['ssi_plan_insert_calls'];
@@ -3106,7 +3108,7 @@ $home_id                   = (int) ( $nested_index_ids['website/index.html'] ?? 
 $about_id                  = (int) ( $nested_index_ids['website/about/index.html'] ?? 0 );
 $team_id                   = (int) ( $nested_index_ids['website/about/team/index.html'] ?? 0 );
 $assert( 'completed' === $nested_index_receipt['status'] && 3 === count( array_unique( array( $home_id, $about_id, $team_id ) ) ), 'wrapper-root nested index pages materialize as distinct WordPress posts' );
-$assert( 'index' === ( $GLOBALS['ssi_plan_posts'][ $home_id ]['post_name'] ?? null ) && 0 === ( $GLOBALS['ssi_plan_posts'][ $home_id ]['post_parent'] ?? null ), 'wrapper entrypoint preserves its root page identity' );
+$assert( 'home' === ( $GLOBALS['ssi_plan_posts'][ $home_id ]['post_name'] ?? null ) && 0 === ( $GLOBALS['ssi_plan_posts'][ $home_id ]['post_parent'] ?? null ), 'wrapper entrypoint preserves its root page identity' );
 $assert( 'about' === ( $GLOBALS['ssi_plan_posts'][ $about_id ]['post_name'] ?? null ) && 0 === ( $GLOBALS['ssi_plan_posts'][ $about_id ]['post_parent'] ?? null ), 'nested index page slug matches its top-level canonical route' );
 $assert( 'team' === ( $GLOBALS['ssi_plan_posts'][ $team_id ]['post_name'] ?? null ) && $about_id === ( $GLOBALS['ssi_plan_posts'][ $team_id ]['post_parent'] ?? null ), 'deeper nested index page preserves canonical slug and WordPress parent identity' );
 
@@ -3412,7 +3414,7 @@ $route_meta_failure_receipt = Static_Site_Importer_WordPress_Site_Plan_Materiali
 $GLOBALS['ssi_plan_meta_write_failure'] = null;
 $assert( 'partial' === ( $route_meta_failure_receipt['status'] ?? '' ) && 'route_link_rewrite_failed' === ( $route_meta_failure_receipt['errors'][0]['code'] ?? '' ) && $posts_before_route_meta_failure === $GLOBALS['ssi_plan_posts'] && $meta_before_route_meta_failure === $GLOBALS['ssi_plan_meta'], 'route-link provenance metadata failure rolls back all inserted pages and metadata' );
 $route_receipt             = Static_Site_Importer_WordPress_Site_Plan_Materializer::materialize( $route_plan, array( 'slug' => 'route-link-plan' ) );
-$route_home                = current( array_filter( $GLOBALS['ssi_plan_posts'], static fn( array $post ): bool => 'index' === ( $post['post_name'] ?? '' ) ) );
+$route_home                = current( array_filter( $GLOBALS['ssi_plan_posts'], static fn( array $post ): bool => 'home' === ( $post['post_name'] ?? '' ) ) );
 $route_content             = is_array( $route_home ) ? stripslashes( (string) ( $route_home['post_content'] ?? '' ) ) : '';
 $route_rendered            = Static_Site_Importer_Internal_Link_Runtime::resolve_urls( $route_content );
 $contact_source_id = (int) ( $route_receipt['completed']['pages']['website/contact/index.html'] ?? 0 );
@@ -3435,7 +3437,7 @@ $GLOBALS['ssi_plan_permalink_structure'] = 'postname';
 $destination_plan     = ( new ArtifactCompiler() )->compile( $route_artifact )->toArray()['source_reports']['wordpress_site_plan'];
 $register_plan_blocks( $destination_plan );
 $destination_receipt  = Static_Site_Importer_WordPress_Site_Plan_Materializer::materialize( $destination_plan, array( 'slug' => 'route-link-destination-plan' ) );
-$destination_home     = current( array_filter( $GLOBALS['ssi_plan_posts'], static fn( array $post ): bool => 'index' === ( $post['post_name'] ?? '' ) ) );
+$destination_home     = current( array_filter( $GLOBALS['ssi_plan_posts'], static fn( array $post ): bool => 'home' === ( $post['post_name'] ?? '' ) ) );
 $destination_stored   = is_array( $destination_home ) ? stripslashes( (string) ( $destination_home['post_content'] ?? '' ) ) : '';
 $assert( 'completed' === ( $destination_receipt['status'] ?? '' ) && ! str_contains( $destination_stored, 'https://example.test/news/' ) && ! str_contains( $destination_stored, 'https://example.test/2024/03/news/' ), 'imported internal links are not frozen to the build host permalink structure' );
 $GLOBALS['ssi_plan_permalink_structure'] = 'pretty';
@@ -3892,5 +3894,86 @@ $assert(
 	'a generated-theme import still publishes its own assets in its own theme directory with unchanged receipt identity: ' . wp_json_encode( $generated_surface_receipt['errors'] ?? array() )
 );
 $GLOBALS['ssi_plan_options'] = $slice_existing_options_before;
+
+// Shared chrome can own a runtime entity: a footer whose newsletter form is the
+// same on every page moves into one template part, and its binding names that
+// part. The provider replacement lands in the part's resolved document and in
+// the canonical write that becomes parts/footer.html, whose asset token stays
+// intact; pages are untouched.
+$part_form_search      = '<!-- wp:group {"className":"signup"} --><div class="wp-block-group signup"><!-- wp:paragraph --><p>Join</p><!-- /wp:paragraph --></div><!-- /wp:group -->';
+$part_form_replacement = '<!-- wp:paragraph --><p>Provider form</p><!-- /wp:paragraph -->';
+$part_logo_canonical   = '<!-- wp:image {"url":"{{wordpress-site-plan:asset:asset-0123456789abcdef}}"} --><figure class="wp-block-image"><img src="{{wordpress-site-plan:asset:asset-0123456789abcdef}}" alt=""/></figure><!-- /wp:image -->';
+$part_logo_resolved    = str_replace( '{{wordpress-site-plan:asset:asset-0123456789abcdef}}', 'https://example.test/wp-content/themes/captured/assets/logo.png', $part_logo_canonical );
+$part_binding_plan     = array(
+	'pages'          => array(
+		array(
+			'source_path'           => 'index.html',
+			'resolved_block_markup' => '<!-- wp:paragraph --><p>Home</p><!-- /wp:paragraph -->' . $part_form_search,
+		),
+	),
+	'template_parts' => array(
+		array(
+			'source_path'           => 'wordpress-site-plan/shared/footer#footer',
+			'slug'                  => 'footer',
+			'resolved_block_markup' => $part_logo_resolved . $part_form_search,
+		),
+	),
+	'writes'         => array(
+		array(
+			'kind'        => 'theme_template_part',
+			'target_path' => 'parts/footer.html',
+			'payload'     => array(
+				'encoding' => 'utf8',
+				'data'     => $part_logo_canonical . $part_form_search,
+			),
+		),
+	),
+);
+$part_binding = array(
+	'schema'                   => 'static-site-importer/runtime-entity-binding/v1',
+	'source_path'              => 'wordpress-site-plan/shared/footer#footer',
+	'search_block_markup'      => $part_form_search,
+	'replacement_block_markup' => $part_form_replacement,
+	'occurrence'               => 1,
+	'role'                     => 'form',
+	'reconciliation_identity'  => hash( 'sha256', 'part-form-binding' ),
+);
+$part_binding_reports     = array();
+$part_binding_diagnostics = array();
+$part_bound_plan          = $part_binding_plan;
+Static_Site_Importer_Site_Plan_Preparation::apply_runtime_entity_bindings( $part_bound_plan, array( $part_binding ), $part_binding_reports, $part_binding_diagnostics );
+$part_bound_write = $part_bound_plan['writes'][0];
+$assert(
+	$part_logo_resolved . $part_form_replacement === ( $part_bound_plan['template_parts'][0]['materialized_block_markup'] ?? null )
+	&& $part_logo_canonical . $part_form_replacement === $part_bound_write['payload']['data']
+	&& hash( 'sha256', $part_bound_write['payload']['data'] ) === ( $part_bound_write['payload_hash'] ?? null )
+	&& ! isset( $part_bound_plan['pages'][0]['materialized_block_markup'] ),
+	'a binding owned by a shared template part replaces the part document and its canonical write, keeping the part asset token and leaving pages untouched'
+);
+$part_report = $part_binding_reports[ $part_binding['reconciliation_identity'] ] ?? array();
+$assert( 'wordpress-site-plan/shared/footer#footer' === ( $part_report['source_path'] ?? null ) && hash( 'sha256', $part_logo_resolved . $part_form_replacement ) === ( $part_report['materialized_content_hash'] ?? null ), 'the part binding report hashes the materialized part document' );
+$part_lifecycle = array( 'entities' => array( 'forms' => array( 'adapter' => array(), 'manifest' => array( 'forms' => array( array( 'bindings' => array( array( 'source_path' => 'wordpress-site-plan/shared/footer#footer', 'search_block_markup' => $part_form_search, 'occurrence' => 1 ) ) ) ) ) ) ) );
+$assert( true === Static_Site_Importer_Runtime_Entity_Binding_Validation::preflight_runtime_entity_binding_anchors( $part_binding_plan, $part_lifecycle, array() ), 'preflight accepts a binding anchored in a shared template part' );
+$part_rejected = false;
+try {
+	$part_unknown_plan = $part_binding_plan;
+	Static_Site_Importer_Site_Plan_Preparation::apply_runtime_entity_bindings( $part_unknown_plan, array( array( 'source_path' => 'wordpress-site-plan/shared/sidebar#sidebar' ) + $part_binding ), $part_binding_reports, $part_binding_diagnostics );
+} catch ( InvalidArgumentException $error ) {
+	$part_rejected = 'runtime_entity_binding_invalid' === $error->getMessage();
+}
+$assert( $part_rejected, 'a binding naming a document the plan does not render is rejected' );
+$part_theme_dir = sys_get_temp_dir() . '/ssi-part-binding-' . bin2hex( random_bytes( 4 ) );
+mkdir( $part_theme_dir . '/parts', 0777, true );
+foreach ( array( 'completed' => $part_bound_write['payload']['data'], 'unresolved' => $part_logo_canonical . $part_form_search ) as $part_expected_status => $part_file ) {
+	file_put_contents( $part_theme_dir . '/parts/footer.html', $part_file );
+	$part_state = array(
+		'theme_dir' => $part_theme_dir,
+		'resolved'  => $part_bound_plan,
+		'applied'   => array( 'runtime_declarations' => array( 'entity_bindings' => $part_binding_reports ) ),
+	);
+	Static_Site_Importer_Site_Plan_Persistence::complete_template_part_entity_bindings( $part_state );
+	$part_completed = $part_state['applied']['runtime_declarations']['entity_bindings'][ $part_binding['reconciliation_identity'] ];
+	$assert( $part_expected_status === $part_completed['status'] && ( 'unresolved' === $part_expected_status || 'parts/footer.html' === ( $part_completed['template_part'] ?? null ) ), 'a part binding completes only when the written part file carries the provider fragment (' . $part_expected_status . ')' );
+}
 
 echo "WordPress site plan materializer smoke passed.\n";

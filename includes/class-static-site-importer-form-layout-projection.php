@@ -191,7 +191,7 @@ final class Static_Site_Importer_Form_Layout_Projection {
 	 *
 	 * @param array<int,array<string,mixed>> $field_blocks
 	 * @param array<int,array<string,mixed>> $controls
-	 * @return array{blocks:array<int,array<string,mixed>>,losses:array<int,array<string,mixed>>,operations:array<int,array<string,mixed>>,represented_layout_nodes:array<int,string>,represented_topology_nodes:array<int,string>,suppressed_layout_properties:array<string,array<int,string>>,overlay_node_targets:array<int,array<string,mixed>>,responsive_variant_targets:array<int,array<string,mixed>>,native_visibility_targets:array<int,string>,form_classes:array<int,string>,provider_layout_targets:array<string,string>,phone_popup_targets:array<int,int>}|null
+	 * @return array{blocks:array<int,array<string,mixed>>,losses:array<int,array<string,mixed>>,operations:array<int,array<string,mixed>>,represented_layout_nodes:array<int,string>,represented_topology_nodes:array<int,string>,suppressed_layout_properties:array<string,array<int,string>>,overlay_node_targets:array<int,array<string,mixed>>,responsive_variant_targets:array<int,array<string,mixed>>,native_visibility_targets:array<int,string>,form_classes:array<int,string>,provider_layout_targets:array<string,string>,phone_popup_targets:array<int,int>,grid_span_submit_controls?:array<int,int>}|null
 	 */
 	public static function topology_inner_blocks( array $form, array $field_blocks, array $controls, array $suppressed_controls = array() ): ?array {
 		if ( ! isset( $form['control_topology'] ) ) {
@@ -305,6 +305,12 @@ final class Static_Site_Importer_Form_Layout_Projection {
 		$layout_nodes_by_id           = array();
 		$variants_by_node             = array();
 		$form_classes                 = array();
+		$grid_span_active             = false;
+		$grid_span_gap                = null;
+		$grid_span_gap_variants       = array();
+		$grid_span_submit_controls    = array();
+		$grid_span_submit_parents     = array();
+		$grid_span_container          = 'form';
 		foreach ( array_keys( $auxiliary_popup_controls ) as $control_index ) {
 			$operations[] = array(
 				'dimension'   => 'topology',
@@ -792,10 +798,15 @@ final class Static_Site_Importer_Form_Layout_Projection {
 			if ( ! $variants_safe ) {
 				continue;
 			}
-			$overlay_node_targets[]     = array(
+			$overlay_node_targets[]      = array(
 				'id'     => 'control-' . $control_index,
 				'layout' => array( 'width' => $width ),
 			);
+			$grid_span_submit_controls[] = $control_index;
+			$submit_parent               = is_string( $layout_node['parent'] ?? null ) ? $layout_node['parent'] : '';
+			if ( '' !== $submit_parent ) {
+				$grid_span_submit_parents[ $submit_parent ] = true;
+			}
 			$responsive_variant_targets = array_merge( $responsive_variant_targets, $target_variants );
 			$represented_layout_nodes[] = $id;
 			$operations[]               = array(
@@ -803,6 +814,25 @@ final class Static_Site_Importer_Form_Layout_Projection {
 				'strategy'    => 'provider_grid_span_submit',
 				'target_hash' => hash( 'sha256', $id ),
 			);
+		}
+		foreach ( array_keys( $grid_span_submit_parents ) as $submit_parent ) {
+			$saw_submit_control = false;
+			$submit_parent_done = true;
+			foreach ( $children[ $submit_parent ] ?? array() as $submit_child ) {
+				$submit_branch = array_values( array_filter( $collect_controls( $submit_child ), static fn ( int $index ): bool => isset( $field_blocks[ $index ] ) ) );
+				if ( empty( $submit_branch ) ) {
+					continue;
+				}
+				$saw_submit_control = true;
+				$submit_child_id    = $submit_child['id'];
+				if ( '' === $submit_child_id || ! in_array( $submit_child_id, $represented_layout_nodes, true ) ) {
+					$submit_parent_done = false;
+					break;
+				}
+			}
+			if ( $saw_submit_control && $submit_parent_done ) {
+				$represented_layout_nodes[] = $submit_parent;
+			}
 		}
 		foreach ( $layout_nodes_by_id as $id => $layout_node ) {
 			$sizing    = $layout_node['sizing'] ?? null;
@@ -1172,12 +1202,33 @@ final class Static_Site_Importer_Form_Layout_Projection {
 		// that does not land on one of those steps, a row that does not tile, or
 		// any other wrapper fact stays unrepresented.
 		foreach ( $children as $parent => $siblings ) {
-			if ( ! is_string( $parent ) || 1 !== preg_match( '/^wrapper-[0-9]+$/D', $parent ) || count( $siblings ) < 2 || in_array( $parent, $represented_layout_nodes, true ) || isset( $percentage_width_parents[ $parent ] ) || ! empty( $variants_by_node[ $parent ] ) ) {
+			if ( 1 !== preg_match( '/^wrapper-[0-9]+$/D', $parent ) || count( $siblings ) < 2 || in_array( $parent, $represented_layout_nodes, true ) || isset( $percentage_width_parents[ $parent ] ) ) {
 				continue;
 			}
 			$layout_node = $layout_nodes_by_id[ $parent ] ?? null;
 			$layout      = is_array( $layout_node ) && is_array( $layout_node['layout'] ?? null ) ? $layout_node['layout'] : array();
-			$columns     = self::grid_repeat_column_count( is_string( $layout['columns'] ?? null ) ? $layout['columns'] : '' );
+			$gap_variant = null;
+			$variants    = $variants_by_node[ $parent ] ?? array();
+			if ( ! empty( $variants ) ) {
+				if ( 1 !== count( $variants ) ) {
+					continue;
+				}
+				$candidate = $variants[0];
+				$patch     = is_array( $candidate['layout_patch'] ?? null ) ? $candidate['layout_patch'] : array();
+				$condition = $candidate['condition'] ?? null;
+				$proven    = false;
+				foreach ( $candidate['provenance'] ?? array() as $fact ) {
+					if ( is_array( $fact ) && ( $fact['condition'] ?? null ) === $condition && in_array( 'column-gap', $fact['properties'] ?? array(), true ) && is_string( $fact['source_path'] ?? null ) && is_string( $fact['selector'] ?? null ) && 1 === preg_match( '/^[a-f0-9]{64}$/D', (string) ( $fact['source_sha256'] ?? '' ) ) ) {
+						$proven = true;
+						break;
+					}
+				}
+				if ( array( 'column_gap' ) !== array_keys( $patch ) || ! is_array( $condition ) || 'media' !== ( $condition['kind'] ?? null ) || ! self::is_min_width_media_query( (string) ( $condition['query'] ?? '' ) ) || ! $proven || null === self::resolved_gap_length( (string) $patch['column_gap'] ) ) {
+					continue;
+				}
+				$gap_variant = $candidate;
+			}
+			$columns = self::grid_repeat_column_count( is_string( $layout['columns'] ?? null ) ? $layout['columns'] : '' );
 			if ( ! is_array( $layout_node ) || null === $columns || array_diff( array_keys( $layout ), array( 'display', 'columns', 'width', 'column_gap', 'gap' ) ) || 'grid' !== ( $layout['display'] ?? null ) || ( isset( $layout['width'] ) && '100%' !== $layout['width'] ) || ! $has_unconditional_proven_property( $layout_node, 'display' ) || ! $has_unconditional_proven_property( $layout_node, 'grid-template-columns' ) || ( isset( $layout['width'] ) && ! $has_unconditional_proven_property( $layout_node, 'width' ) ) ) {
 				continue;
 			}
@@ -1188,18 +1239,20 @@ final class Static_Site_Importer_Form_Layout_Projection {
 				continue;
 			}
 			$source_gap = isset( $layout['column_gap'] ) ? trim( (string) $layout['column_gap'] ) : ( isset( $layout['gap'] ) ? trim( (string) $layout['gap'] ) : null );
-			$gap        = null === $source_gap ? '1.5rem' : self::resolved_gap_length( $source_gap );
+			$gap        = null === $source_gap ? ( null === $gap_variant ? '1.5rem' : '0px' ) : self::resolved_gap_length( $source_gap );
 			if ( ! is_string( $gap ) ) {
 				continue;
 			}
-			$placements = array();
-			$accepted   = true;
+			$placements        = array();
+			$submit_placements = array();
+			$accepted          = true;
 			foreach ( $siblings as $sibling ) {
-				$sibling_id = is_array( $sibling ) && is_string( $sibling['id'] ?? null ) ? $sibling['id'] : '';
+				$sibling_id = $sibling['id'];
 				$branch     = '' !== $sibling_id ? array_values( array_filter( $collect_controls( $sibling ), static fn ( int $index ): bool => isset( $field_blocks[ $index ] ) ) ) : array();
 				$item_node  = $layout_nodes_by_id[ $sibling_id ] ?? null;
 				$item       = is_array( $item_node ) && is_array( $item_node['layout'] ?? null ) ? $item_node['layout'] : array();
-				if ( '' === $sibling_id || 1 !== count( $branch ) || 'core/button' === ( $field_blocks[ $branch[0] ]['name'] ?? '' ) || ! empty( $variants_by_node[ $sibling_id ] ) || isset( $item['column'], $item['area'] ) || ( ! isset( $item['column'] ) && ! isset( $item['area'] ) ) || ! is_array( $item_node ) ) {
+				$is_submit  = 1 === count( $branch ) && 'core/button' === ( $field_blocks[ $branch[0] ]['name'] ?? '' );
+				if ( '' === $sibling_id || 1 !== count( $branch ) || ! empty( $variants_by_node[ $sibling_id ] ) || isset( $item['column'], $item['area'] ) || ( ! isset( $item['column'] ) && ! isset( $item['area'] ) ) ) {
 					$accepted = false;
 					break;
 				}
@@ -1229,6 +1282,19 @@ final class Static_Site_Importer_Form_Layout_Projection {
 						break;
 					}
 					$row = $row_start;
+				}
+				if ( $is_submit ) {
+					if ( null === self::clean_provider_field_width( $span / $columns ) ) {
+						$accepted = false;
+						break;
+					}
+					$submit_placements[] = array(
+						'control' => $branch[0],
+						'node'    => $sibling_id,
+						'span'    => $span,
+						'layout'  => $item,
+					);
+					continue;
 				}
 				$placements[] = array(
 					'control' => $branch[0],
@@ -1270,9 +1336,50 @@ final class Static_Site_Importer_Form_Layout_Projection {
 					),
 					'important' => array( 'margin_block_start' ),
 				);
+				if ( null !== $gap_variant ) {
+					$variant_gap                  = self::resolved_gap_length( (string) $gap_variant['layout_patch']['column_gap'] );
+					$variant_track                = self::fractional_track_size( $share, $variant_gap );
+					$responsive_variant_targets[] = array(
+						'node'         => 'field-' . $placement['control'],
+						'condition'    => $gap_variant['condition'],
+						'layout_patch' => array(
+							'width'      => $variant_track,
+							'flex_basis' => $variant_track,
+						),
+					);
+				}
 				if ( ! array_diff( array_keys( $placement['layout'] ), array( 'column', 'row', 'area' ) ) ) {
 					$overlay_represented_nodes[] = $placement['node'];
 				}
+			}
+			foreach ( $submit_placements as $placement ) {
+				$share                       = $placement['span'] / $columns;
+				$track                       = self::fractional_track_size( $share, $gap );
+				$overlay_node_targets[]      = array(
+					'id'        => 'control-' . $placement['control'],
+					'layout'    => array(
+						'width'              => $track,
+						'flex_grow'          => '0',
+						'flex_shrink'        => '0',
+						'flex_basis'         => $track,
+						'margin_block_start' => '0',
+					),
+					'important' => array( 'margin_block_start' ),
+				);
+				$grid_span_submit_controls[] = $placement['control'];
+				if ( ! array_diff( array_keys( $placement['layout'] ), array( 'column', 'row', 'area' ) ) ) {
+					$overlay_represented_nodes[] = $placement['node'];
+				}
+			}
+			$grid_span_active = true;
+			if ( null !== $gap_variant ) {
+				$grid_span_gap_variants[ (string) wp_json_encode( $gap_variant['condition'] ) ] = array(
+					'condition' => $gap_variant['condition'],
+					'gap'       => self::resolved_gap_length( (string) $gap_variant['layout_patch']['column_gap'] ),
+				);
+			}
+			if ( null === $grid_span_gap ) {
+				$grid_span_gap = is_string( $source_gap ) && Static_Site_Importer_Provider_Layout_Overlay::layout_values_are_safe( array( 'gap' => $source_gap ) ) ? $source_gap : $gap;
 			}
 			$represented_layout_nodes[] = $parent;
 			$operations[]               = array(
@@ -1464,7 +1571,13 @@ final class Static_Site_Importer_Form_Layout_Projection {
 			// authored top margin (mt-9) would sit inside the list gap, or a gap
 			// cancel would overwrite it. Keep the list's display/gap on a dedicated
 			// inner wrapper and leave the submit outside.
-			$use_field_list = ! empty( $sibling_submit_indexes );
+			// A source may keep several grid rows inside a column-oriented form.
+			// Jetpack's fields need their own row-oriented list while its submit
+			// remains a sibling, regardless of whether the source nested the submit.
+			$use_field_list = ! empty( $sibling_submit_indexes ) || ! empty( $grid_span_gap_variants );
+			if ( $use_field_list && $grid_span_active ) {
+				$grid_span_container = 'field-list';
+			}
 			if ( $use_field_list ) {
 				$form_classes[]     = 'ssi-source-field-list';
 				$field_list_layout  = $merged_base;
@@ -1483,10 +1596,22 @@ final class Static_Site_Importer_Form_Layout_Projection {
 					);
 				}
 				foreach ( $merged_variants as $variant ) {
+					$patch = $variant['layout_patch'];
+					if ( ! empty( $grid_span_gap_variants ) && 'column' === ( $patch['direction'] ?? null ) && 'flex' === ( $patch['display'] ?? null ) ) {
+						// The original column gap is between source rows. Once fields
+						// are flattened into the provider list it becomes a row gap;
+						// each grid row's separately proven column gap is projected below.
+						$patch['direction'] = 'row';
+						$patch['wrap']      = 'wrap';
+						if ( isset( $patch['gap'] ) ) {
+							$patch['row_gap'] = $patch['gap'];
+							unset( $patch['gap'] );
+						}
+					}
 					$responsive_variant_targets[] = array(
 						'node'         => 'field-list',
 						'condition'    => $variant['condition'] ?? null,
-						'layout_patch' => $variant['layout_patch'],
+						'layout_patch' => $patch,
 					);
 				}
 			} else {
@@ -1511,6 +1636,24 @@ final class Static_Site_Importer_Form_Layout_Projection {
 			// field-list wrapper. Once that wrapper carries the list's gap the
 			// submit sits outside it, so there is no transposed gap left to cancel
 			// against its authored margin (#1738).
+		}
+		if ( $grid_span_active && is_string( $grid_span_gap ) ) {
+			$overlay_node_targets[] = array(
+				'id'     => $grid_span_container,
+				'layout' => array(
+					'display'   => 'flex',
+					'direction' => 'row',
+					'wrap'      => 'wrap',
+					'gap'       => $grid_span_gap,
+				),
+			);
+		}
+		foreach ( $grid_span_gap_variants as $variant ) {
+			$responsive_variant_targets[] = array(
+				'node'         => $grid_span_container,
+				'condition'    => $variant['condition'],
+				'layout_patch' => array( 'column_gap' => $variant['gap'] ),
+			);
 		}
 		foreach ( $wrapper_hooks as $node_id => $hook ) {
 			$layout_node = $layout_nodes_by_id[ $node_id ] ?? null;
@@ -1599,6 +1742,7 @@ final class Static_Site_Importer_Form_Layout_Projection {
 			'form_classes'                 => array_values( array_unique( $form_classes ) ),
 			'provider_layout_targets'      => $provider_layout_targets,
 			'phone_popup_targets'          => $phone_popup_targets,
+			'grid_span_submit_controls'    => array_values( array_unique( $grid_span_submit_controls ) ),
 		);
 	}
 
@@ -1704,7 +1848,7 @@ final class Static_Site_Importer_Form_Layout_Projection {
 	 * @param array<string,array<string,mixed>> $layout_nodes
 	 * @param array<string,array<string,mixed>> $layouts
 	 * @param array<string,array<int,array<string,mixed>>> $variants
-	 * @return array{blocks:array<int,array<string,mixed>>,losses:array<int,array<string,mixed>>,operations:array<int,array<string,mixed>>,represented_layout_nodes:array<int,string>,represented_topology_nodes:array<int,string>,suppressed_layout_properties:array<string,array<int,string>>,overlay_node_targets:array<int,array<string,mixed>>,responsive_variant_targets:array<int,array<string,mixed>>,native_visibility_targets:array<int,string>,form_classes:array<int,string>,provider_layout_targets:array<string,string>,phone_popup_targets:array<int,int>}|null
+	 * @return array{blocks:array<int,array<string,mixed>>,losses:array<int,array<string,mixed>>,operations:array<int,array<string,mixed>>,represented_layout_nodes:array<int,string>,represented_topology_nodes:array<int,string>,suppressed_layout_properties:array<string,array<int,string>>,overlay_node_targets:array<int,array<string,mixed>>,responsive_variant_targets:array<int,array<string,mixed>>,native_visibility_targets:array<int,string>,form_classes:array<int,string>,provider_layout_targets:array<string,string>,phone_popup_targets:array<int,int>,grid_span_submit_controls?:array<int,int>}|null
 	 */
 	private static function exact_native_div_topology( array $nodes, array $children, array $field_blocks, array $suppressed_controls, array $layout_nodes, array $layouts, array $variants, string $scope ): ?array {
 		$wrappers = array();
@@ -1776,7 +1920,27 @@ final class Static_Site_Importer_Form_Layout_Projection {
 			$layout_node     = $layout_nodes[ $id ] ?? null;
 			$parent          = is_string( $wrapper['parent'] ?? null ) ? $wrapper['parent'] : '$root';
 			$expected_parent = '$root' === $parent ? 'form' : $parent;
-			if ( ! is_array( $layout_node ) || 'div' !== ( $layout_node['source']['tag'] ?? null ) || ( $layout_node['parent'] ?? null ) !== $expected_parent || ! is_array( $layouts[ $id ] ?? null ) || 'flex' !== ( $layouts[ $id ]['display'] ?? null ) || ! in_array( $layouts[ $id ]['direction'] ?? null, array( 'row', 'column' ), true ) || ! Static_Site_Importer_Provider_Layout_Overlay::layout_values_are_safe( $layouts[ $id ] ) || ! $proven( $layout_node['provenance'] ?? array(), null, $layouts[ $id ] ) ) {
+			$layout          = $layouts[ $id ] ?? null;
+			if ( ! is_array( $layout_node ) || 'div' !== ( $layout_node['source']['tag'] ?? null ) || ( $layout_node['parent'] ?? null ) !== $expected_parent || ! is_array( $layout ) || ! Static_Site_Importer_Provider_Layout_Overlay::layout_values_are_safe( $layout ) || ! $proven( $layout_node['provenance'] ?? array(), null, $layout ) ) {
+				return null;
+			}
+			$flex = 'flex' === ( $layout['display'] ?? null ) && in_array( $layout['direction'] ?? 'row', array( 'row', 'column' ), true );
+			$grid = 'grid' === ( $layout['display'] ?? null )
+				&& ! array_diff( array_keys( $layout ), array( 'display', 'columns', 'gap' ) )
+				&& self::is_equal_fraction_columns( preg_replace( '/\s+/', '', (string) ( $layout['columns'] ?? '' ) ), 1 )
+				&& 2 === count( $children[ $id ] ?? array() )
+				&& 2 === count( array_filter( $children[ $id ], static fn( array $child ): bool => 'control' === ( $child['kind'] ?? null ) && isset( $field_blocks[ $child['control'] ?? -1 ] ) && 'core/button' !== ( $field_blocks[ $child['control'] ]['name'] ?? null ) ) )
+				&& 1 === count( $variants[ $id ] ?? array() );
+			if ( $grid ) {
+				$variant   = $variants[ $id ][0];
+				$condition = $variant['condition'] ?? null;
+				$patch     = $variant['layout_patch'] ?? null;
+				$grid      = is_array( $condition ) && 'media' === ( $condition['kind'] ?? null )
+					&& is_string( $condition['query'] ?? null ) && self::is_min_width_media_query( $condition['query'] )
+					&& is_array( $patch ) && array( 'columns' ) === array_keys( $patch )
+					&& self::is_equal_fraction_columns( preg_replace( '/\s+/', '', (string) ( $patch['columns'] ?? '' ) ), 2 );
+			}
+			if ( ! $flex && ! $grid ) {
 				return null;
 			}
 			foreach ( $variants[ $id ] ?? array() as $variant ) {
@@ -1808,18 +1972,19 @@ final class Static_Site_Importer_Form_Layout_Projection {
 					}
 					continue;
 				}
-				$id       = $node['id'];
-				$classes  = preg_split( '/\s+/', trim( (string) ( $wrappers[ $id ]['class'] ?? '' ) ) );
-				$classes  = false === $classes ? array() : array_values( array_filter( $classes ) );
+				$id      = $node['id'];
+				$classes = preg_split( '/\s+/', trim( (string) ( $wrappers[ $id ]['class'] ?? '' ) ) );
+				$classes = false === $classes ? array() : array_values( array_filter( $classes ) );
+				$attrs   = array( 'className' => trim( implode( ' ', array_merge( $classes, array( $hooks[ $id ] ) ) ) ) );
+				if ( 'flex' === ( $layouts[ $id ]['display'] ?? null ) ) {
+					$attrs['layout'] = array(
+						'type'        => 'flex',
+						'orientation' => 'column' === ( $layouts[ $id ]['direction'] ?? null ) ? 'vertical' : 'horizontal',
+					);
+				}
 				$blocks[] = array(
 					'name'        => 'core/group',
-					'attrs'       => array(
-						'className' => trim( implode( ' ', array_merge( $classes, array( $hooks[ $id ] ) ) ) ),
-						'layout'    => array(
-							'type'        => 'flex',
-							'orientation' => 'row' === ( $layouts[ $id ]['direction'] ?? null ) ? 'horizontal' : 'vertical',
-						),
-					),
+					'attrs'       => $attrs,
 					'innerBlocks' => $build( $id ),
 				);
 			}
@@ -2540,7 +2705,10 @@ final class Static_Site_Importer_Form_Layout_Projection {
 				'role'       => 'label',
 				'selector'   => '.' . $scope . ' .' . $label_class,
 				'properties' => array_keys( Static_Site_Importer_Provider_Layout_Overlay::presentation_property_keys() ),
-				'resets'     => array( 'font-weight' => 'inherit' ),
+				'resets'     => array(
+					'margin'      => '0',
+					'font-weight' => 'inherit',
+				),
 			);
 		}
 		if ( isset( $roles['required_marker'] ) ) {
@@ -2828,7 +2996,7 @@ final class Static_Site_Importer_Form_Layout_Projection {
 		if ( 1 !== preg_match( '/^(?:([1-9][0-9]*)\/)?span([1-9][0-9]*)$/D', $column, $span ) ) {
 			return null;
 		}
-		$start = '' === ( $span[1] ?? '' ) ? null : (int) $span[1];
+		$start = '' === $span[1] ? null : (int) $span[1];
 		$size  = (int) $span[2];
 		if ( $size > $count || ( null !== $start && ( $start < 1 || $start + $size - 1 > $count ) ) ) {
 			return null;
@@ -2877,6 +3045,9 @@ final class Static_Site_Importer_Form_Layout_Projection {
 	 */
 	private static function resolved_gap_length( string $gap ): ?string {
 		$gap = trim( $gap );
+		if ( 1 === preg_match( '/^calc\(\s*([0-9]+(?:\.[0-9]+)?)\s*\*\s*([0-9]+(?:\.[0-9]+)?)(px|rem|em)\s*\)$/D', $gap, $product ) ) {
+			return rtrim( rtrim( number_format( (float) $product[1] * (float) $product[2], 4, '.', '' ), '0' ), '.' ) . $product[3];
+		}
 		if ( 1 === preg_match( '/^(?:0|[0-9]+(?:\.[0-9]+)?)(?:px|rem|em)$/D', $gap ) ) {
 			return $gap;
 		}
@@ -2954,7 +3125,9 @@ final class Static_Site_Importer_Form_Layout_Projection {
 		usort(
 			$visual,
 			static function ( array $left, array $right ): int {
-				return $left['row'] <=> $right['row'] ?: $left['start'] <=> $right['start'];
+				$row_order = $left['row'] <=> $right['row'];
+
+				return 0 !== $row_order ? $row_order : $left['start'] <=> $right['start'];
 			}
 		);
 		if ( array_column( $visual, 'control' ) !== array_column( $normalized, 'control' ) ) {

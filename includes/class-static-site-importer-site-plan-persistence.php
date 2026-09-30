@@ -25,6 +25,9 @@ if ( ! class_exists( 'Static_Site_Importer_Internal_Link_Runtime' ) ) {
 if ( ! class_exists( 'Static_Site_Importer_Source_Route_Redirect' ) ) {
 	require_once __DIR__ . '/class-static-site-importer-source-route-redirect.php';
 }
+if ( ! class_exists( 'Static_Site_Importer_Redirects_Manifest' ) ) {
+	require_once __DIR__ . '/class-static-site-importer-redirects-manifest.php';
+}
 
 /** Writes posts, files, overlays, and journals for a prepared plan. */
 final class Static_Site_Importer_Site_Plan_Persistence {
@@ -79,6 +82,24 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 		$route_title_overlay         = $state['route_title_overlay'] ?? array();
 		$route_head_metadata_overlay = $state['route_head_metadata_overlay'] ?? array();
 
+		$state['source_route_aliases'] = Static_Site_Importer_Redirects_Manifest::aliases_for_source_paths(
+			isset( $args['source_route_aliases'] ) && is_array( $args['source_route_aliases'] ) ? $args['source_route_aliases'] : array(),
+			array_values(
+				array_filter(
+					array_map(
+						static fn( array $page ): string => (string) ( $page['source_path'] ?? '' ),
+						$state['ordered_pages']
+					),
+					static fn( string $path ): bool => '' !== $path
+				)
+			)
+		);
+
+		require_once __DIR__ . '/class-static-site-importer-navigation-entity-materializer.php';
+		$navigation_entities = Static_Site_Importer_Navigation_Entity_Materializer::materialize( $state );
+		if ( is_wp_error( $navigation_entities ) ) {
+			return self::failed_receipt_from_error( $state, $navigation_entities );
+		}
 		foreach ( $state['ordered_pages'] as $page ) {
 			if ( ! empty( $page['skip_materialization'] ) ) {
 				continue;
@@ -123,6 +144,14 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 			$source_route = Static_Site_Importer_Source_Route_Redirect::public_source_route( (string) $page['source_path'] );
 			if ( '' !== $source_route && ! self::write_post_meta( $post, Static_Site_Importer_Source_Route_Redirect::META_KEY, $source_route ) ) {
 				return self::failed_receipt( $state, 'materialization_source_route_metadata_write_failed' );
+			}
+			foreach ( $state['source_route_aliases'][ $page['source_path'] ] ?? array() as $alias_route ) {
+				if ( ! is_string( $alias_route ) || '' === $alias_route || $alias_route === $source_route ) {
+					continue;
+				}
+				if ( ! self::add_post_meta_value( $post, Static_Site_Importer_Source_Route_Redirect::META_KEY, $alias_route ) ) {
+					return self::failed_receipt( $state, 'materialization_source_route_metadata_write_failed' );
+				}
 			}
 			foreach ( $state['applied']['runtime_declarations']['entity_bindings'] as &$binding_report ) {
 				if ( ( $binding_report['source_path'] ?? '' ) === $page['source_path'] ) {
@@ -200,6 +229,7 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 			}
 			$state['applied']['files'][] = $result + array( 'publication' => $publication );
 		}
+		self::complete_template_part_entity_bindings( $state );
 		$provider_layout_overlays = isset( $args['provider_layout_overlays'] ) && is_array( $args['provider_layout_overlays'] ) ? $args['provider_layout_overlays'] : array();
 		if ( ! empty( $provider_layout_overlays ) ) {
 			$provider_layout_materialization = self::apply_provider_layout_overlays( $state, $provider_layout_overlays );
@@ -217,7 +247,7 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 			return self::failed_receipt_from_error( $state, $media_library );
 		}
 		$state['applied']['media_library'] = $media_library;
-		$font_materialization = self::apply_font_overlay( $state, $font_overlay );
+		$font_materialization              = self::apply_font_overlay( $state, $font_overlay );
 		if ( is_wp_error( $font_materialization ) ) {
 			return self::failed_receipt_from_error( $state, $font_materialization );
 		}
@@ -384,6 +414,17 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 	public static function write_post_meta( int $id, string $key, string $value ): bool {
 		update_post_meta( $id, $key, wp_slash( $value ) );
 		return metadata_exists( 'post', $id, $key ) && (string) get_post_meta( $id, $key, true ) === $value;
+	}
+
+	/** Append and verify an additional importer-owned post metadata value. */
+	public static function add_post_meta_value( int $id, string $key, string $value ): bool {
+		if ( ! function_exists( 'add_post_meta' ) ) {
+			return false;
+		}
+		add_post_meta( $id, $key, wp_slash( $value ) );
+		$values = get_post_meta( $id, $key, false );
+
+		return is_array( $values ) && in_array( $value, array_map( 'strval', $values ), true );
 	}
 
 	/** Rewrite internal routes to portable post-id references after WordPress has assigned every post. */
@@ -563,6 +604,36 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 			'payload_hash'            => $write['payload_hash'] ?? hash( 'sha256', $data ),
 			'reconciliation_identity' => $write['reconciliation_identity'] ?? hash( 'sha256', $write['source_path'] . "\n" . $write['target_path'] ),
 		);
+	}
+
+	/**
+	 * A binding owned by a shared template part completes when the written part
+	 * file carries the provider fragment, the same proof a page binding gets from
+	 * its persisted post content.
+	 *
+	 * @param array<string,mixed> $state Materialization state.
+	 */
+	public static function complete_template_part_entity_bindings( array &$state ): void {
+		$documents = Static_Site_Importer_Site_Plan_Preparation::runtime_binding_documents( $state['resolved'] );
+		foreach ( $state['applied']['runtime_declarations']['entity_bindings'] as &$binding_report ) {
+			$document = $documents[ (string) ( $binding_report['source_path'] ?? '' ) ] ?? null;
+			if ( ! is_array( $document ) || 'template_parts' !== $document['group'] ) {
+				continue;
+			}
+			$target   = 'parts/' . (string) ( $state['resolved']['template_parts'][ $document['index'] ]['slug'] ?? '' ) . '.html';
+			$path     = $state['theme_dir'] . '/' . $target;
+			$fragment = (string) ( $binding_report['replacement_block_markup'] ?? '' );
+			$content  = is_file( $path ) ? file_get_contents( $path ) : false; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reads the just-written local theme part to prove the binding landed.
+			if ( ! is_string( $content ) || '' === $fragment || ! str_contains( $content, $fragment ) ) {
+				$binding_report['status'] = 'unresolved';
+				continue;
+			}
+			$binding_report['status']                    = 'completed';
+			$binding_report['template_part']             = $target;
+			$binding_report['persisted_fragment_hash']   = hash( 'sha256', $fragment );
+			$binding_report['materialized_content_hash'] = hash( 'sha256', $content );
+		}
+		unset( $binding_report );
 	}
 
 	/** Write every canonical byte or fail before the temporary file can be published. */
@@ -1297,12 +1368,12 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 		);
 	}
 
-	public static function reconciled_post( string $identity ) {
-		// The reconciliation meta key is unique per document, so no post_type
-		// filter is needed; 'any' covers posts, pages, and custom import types.
+	public static function reconciled_post( string $identity, string|array $post_types = 'any' ) {
+		// WordPress 'any' excludes internal/search-excluded types. Entity owners
+		// supply their declared types rather than losing reconciliation on reimport.
 		$posts = get_posts(
 			array(
-				'post_type'   => 'any',
+				'post_type'   => $post_types,
 				'post_status' => 'any',
 				'meta_key'    => self::RECONCILIATION_META_KEY,
 				'meta_value'  => $identity,
@@ -1517,10 +1588,16 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 		// WordPress sanitizes on write ('blogname' runs through esc_html()), so a title containing
 		// & < > " or ' is stored escaped. Verify against what core stores, not the raw value.
 		$stored = function_exists( 'sanitize_option' ) ? sanitize_option( $option, $value ) : $value;
-		if ( get_option( $option, null ) === $stored ) {
+		// Database scalars are strings on a fresh request, while the write cache
+		// retains PHP types. Verify their storage value, including no-op updates.
+		$matches = static fn( $actual ): bool => is_scalar( $actual ) && is_scalar( $stored )
+			? (string) $actual === (string) $stored
+			: $actual === $stored;
+		if ( $matches( get_option( $option, null ) ) ) {
 			return true;
 		}
-		return false !== update_option( $option, $value ) && get_option( $option, null ) === $stored;
+		update_option( $option, $value );
+		return $matches( get_option( $option, null ) );
 	}
 
 	public static function active_theme_matches( string $stylesheet, ?string $template = null ): bool {
@@ -1618,7 +1695,7 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 				continue; }
 			try {
 				if ( ! empty( $before['existing'] ) ) {
-					wp_update_post( $before['post'] );
+					wp_update_post( (array) wp_slash( $before['post'] ) );
 					if ( ! self::write_post_meta( $id, '_static_site_importer_provenance', (string) $before['provenance'] ) || ! self::write_post_meta( $id, self::RECONCILIATION_META_KEY, (string) $before['reconciliation_identity'] ) ) {
 						throw new RuntimeException( 'materialization_rollback_post_meta_restore_failed' );
 					}

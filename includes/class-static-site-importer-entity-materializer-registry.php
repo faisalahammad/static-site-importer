@@ -390,8 +390,12 @@ class Static_Site_Importer_Entity_Materializer_Registry {
 			if ( 'products' === $collection ) {
 				$manifest['schema_version'] = 1;
 			}
-			$validation = 'prepare' === ( $args['runtime_lifecycle_phase'] ?? '' ) ? array( 'errors' => array() ) : self::validate_manifest_generic( $adapter, $manifest );
-			$accepted   = is_array( $validation[ $collection ] ?? null ) ? $validation[ $collection ] : array();
+			// Dependency preparation intentionally defers provider validation until
+			// resume. Runtime entity manifests carry content-hash refs, not entity
+			// bodies; with_resolved_binding_manifests() validates their resolved rows.
+			$defer_validation = 'prepare' === ( $args['runtime_lifecycle_phase'] ?? '' ) || 'blocks-engine/runtime-entity-manifest/v1' === ( $declaration['payload']['schema'] ?? null );
+			$validation       = $defer_validation ? array( 'errors' => array() ) : self::validate_manifest_generic( $adapter, $manifest );
+			$accepted         = is_array( $validation[ $collection ] ?? null ) ? $validation[ $collection ] : array();
 			if ( ! empty( $validation['errors'] ) ) {
 				// Entity validators report per row: an unmappable row is rejected
 				// without discarding the rows that did validate, so partial feature
@@ -417,10 +421,9 @@ class Static_Site_Importer_Entity_Materializer_Registry {
 				}
 				$lifecycle['diagnostics'][] = self::rejected_runtime_entity_rows_diagnostic( $key, $adapter, count( $entities ), count( $accepted ), $validation['errors'] );
 			}
-			// Dependency preparation intentionally defers provider validation until
-			// resume, but its checkpoint must still retain every declared entity.
-			$normalized_manifest = 'prepare' === ( $args['runtime_lifecycle_phase'] ?? '' ) ? $manifest : array( $collection => $accepted );
-			if ( 'products' === $collection && 'prepare' !== ( $args['runtime_lifecycle_phase'] ?? '' ) ) {
+			// Deferred validation must still retain every declared entity.
+			$normalized_manifest = $defer_validation ? $manifest : array( $collection => $accepted );
+			if ( 'products' === $collection && ! $defer_validation ) {
 				$normalized_manifest['schema_version'] = 1;
 			}
 			$lifecycle['entities'][ $key ] = array(
@@ -535,31 +538,9 @@ class Static_Site_Importer_Entity_Materializer_Registry {
 
 	/** Copy producer presentation facts onto the form entity without re-parsing source HTML. */
 	public static function prepare_form_entity( array $entity ): array {
-		$analysis     = Static_Site_Importer_Form_Fallback_Contract::analysis_from_metadata( $entity, is_string( $entity['selector'] ?? null ) ? $entity['selector'] : '', is_int( $entity['occurrence'] ?? null ) ? $entity['occurrence'] : 0 );
-		$presentation = $analysis['presentation'];
-		if ( 'generic/form-presentation/v1' !== ( $presentation['schema'] ?? null ) ) {
-			return $entity;
-		}
-		$controls = isset( $entity['controls'] ) && is_array( $entity['controls'] ) ? $entity['controls'] : array();
-		$form     = isset( $entity['form'] ) && is_array( $entity['form'] ) ? $entity['form'] : array();
-		foreach ( array( 'context_before', 'context_after', 'submit_presentation' ) as $key ) {
-			if ( isset( $presentation[ $key ] ) ) {
-				$form[ $key ] = $presentation[ $key ];
-			}
-		}
-		if ( ! empty( $presentation['interleaved_context'] ) ) {
-			$form['interleaved_context'] = true;
-		}
-		if ( ! empty( $presentation['textarea_height_omitted_count'] ) ) {
-			$form['textarea_height_omitted_count'] = (int) $presentation['textarea_height_omitted_count'];
-		}
-		foreach ( $presentation['textarea_heights'] ?? array() as $index => $height ) {
-			if ( isset( $controls[ $index ] ) && is_string( $height ) ) {
-				$controls[ $index ]['height'] = $height;
-			}
-		}
-		$entity['form']     = $form;
-		$entity['controls'] = $controls;
+		$normalized         = Static_Site_Importer_Form_Fallback_Contract::normalize_form_metadata( $entity );
+		$entity['form']     = $normalized['form'];
+		$entity['controls'] = $normalized['controls'];
 		return $entity;
 	}
 
@@ -1054,7 +1035,26 @@ class Static_Site_Importer_Entity_Materializer_Registry {
 			'materialized_block_hash'          => in_array( $binding['role'], array( 'form', 'commerce_collection' ), true ) ? hash( 'sha256', $replacement ) : '',
 			'provider'                         => $adapter['provider'] ?? '',
 			'superseded_runtime_selectors'     => $binding['superseded_runtime_selectors'] ?? array(),
+			'replaced_fallback_identities'     => 'form' === $binding['role'] ? self::replaced_fallback_identities( $entity ) : array(),
 		);
+	}
+
+	/**
+	 * Source form fallbacks one shared provider form stands for. A producer that
+	 * moved identical chrome into a template part keeps one entity and lists the
+	 * fallback of every page it replaced, its own included.
+	 *
+	 * @param array<string,mixed> $entity Form entity.
+	 * @return array<int,string>
+	 */
+	private static function replaced_fallback_identities( array $entity ): array {
+		$identities = array();
+		foreach ( is_array( $entity['replaced_fallback_identities'] ?? null ) ? $entity['replaced_fallback_identities'] : array() as $identity ) {
+			if ( is_string( $identity ) && 1 === preg_match( '/^[a-f0-9]{64}$/', $identity ) ) {
+				$identities[ $identity ] = true;
+			}
+		}
+		return array_keys( $identities );
 	}
 
 	/** Derive a product-grid fallback's reconciliation identity from its own resolved binding anchor. */
@@ -1488,6 +1488,10 @@ class Static_Site_Importer_Entity_Materializer_Registry {
 			if ( is_string( $fallback_identity ) && 1 === preg_match( '/^[a-f0-9]{64}$/D', $fallback_identity ) ) {
 				$row['fallback_identity'] = $fallback_identity;
 			}
+			$replaced = self::replaced_fallback_identities( $form );
+			if ( array() !== $replaced ) {
+				$row['replaced_fallback_identities'] = $replaced;
+			}
 			if ( array_key_exists( 'control_topology', $form ) ) {
 				$topology = self::normalize_form_control_topology( $form['control_topology'], count( $controls ) );
 				if ( isset( $topology['error'] ) ) {
@@ -1711,7 +1715,7 @@ class Static_Site_Importer_Entity_Materializer_Registry {
 	private static function normalize_form_presentation_graph( mixed $candidate ): array {
 		$is_v2         = is_array( $candidate ) && 'generic/computed-form-presentation/v2' === ( $candidate['schema'] ?? null );
 		$expected_keys = $is_v2 ? array( 'schema', 'basis', 'truncated', 'limits', 'controls', 'visual_parts', 'visual_groups', 'control_containers', 'variants', 'diagnostics' ) : array( 'schema', 'basis', 'truncated', 'limits', 'controls', 'variants', 'diagnostics' );
-		if ( ! is_array( $candidate ) || ( ! $is_v2 && 'generic/computed-form-presentation/v1' !== ( $candidate['schema'] ?? null ) ) || 'source_css_cascade' !== ( $candidate['basis'] ?? null ) || true === ( $candidate['truncated'] ?? null ) || ! is_bool( $candidate['truncated'] ?? null ) || ! self::has_only_keys( $candidate, $expected_keys ) || ! is_array( $candidate['limits'] ?? null ) || ! self::has_only_keys( $candidate['limits'], array( 'controls', 'rules_per_role' ) ) || 128 !== ( $candidate['limits']['controls'] ?? null ) || 32 !== ( $candidate['limits']['rules_per_role'] ?? null ) || ! is_array( $candidate['controls'] ?? null ) || ! array_is_list( $candidate['controls'] ) || count( $candidate['controls'] ) > 128 || ! is_array( $candidate['variants'] ?? null ) || ! array_is_list( $candidate['variants'] ) || count( $candidate['variants'] ) > 256 || ! is_array( $candidate['diagnostics'] ?? null ) || ! array_is_list( $candidate['diagnostics'] ) || count( $candidate['diagnostics'] ) > 32 || ( $is_v2 && ( ! is_array( $candidate['visual_parts'] ?? null ) || ! array_is_list( $candidate['visual_parts'] ) || count( $candidate['visual_parts'] ) > 128 || ! is_array( $candidate['visual_groups'] ?? null ) || ! array_is_list( $candidate['visual_groups'] ) || count( $candidate['visual_groups'] ) > 128 || ! is_array( $candidate['control_containers'] ?? null ) || ! array_is_list( $candidate['control_containers'] ) || count( $candidate['control_containers'] ) > 128 ) ) || array_filter( $candidate['diagnostics'], static fn( $diagnostic ): bool => ! is_string( $diagnostic ) || '' === trim( $diagnostic ) || strlen( $diagnostic ) > 1100 ) ) {
+		if ( ! is_array( $candidate ) || ( ! $is_v2 && 'generic/computed-form-presentation/v1' !== ( $candidate['schema'] ?? null ) ) || 'source_css_cascade' !== ( $candidate['basis'] ?? null ) || true === ( $candidate['truncated'] ?? null ) || ! is_bool( $candidate['truncated'] ?? null ) || ! self::has_only_keys( $candidate, $expected_keys ) || ! is_array( $candidate['limits'] ?? null ) || ! self::has_only_keys( $candidate['limits'], array( 'controls', 'rules_per_role' ) ) || 128 !== ( $candidate['limits']['controls'] ?? null ) || ! in_array( $candidate['limits']['rules_per_role'] ?? null, array( 32, 96 ), true ) || ! is_array( $candidate['controls'] ?? null ) || ! array_is_list( $candidate['controls'] ) || count( $candidate['controls'] ) > 128 || ! is_array( $candidate['variants'] ?? null ) || ! array_is_list( $candidate['variants'] ) || count( $candidate['variants'] ) > 256 || ! is_array( $candidate['diagnostics'] ?? null ) || ! array_is_list( $candidate['diagnostics'] ) || count( $candidate['diagnostics'] ) > 32 || ( $is_v2 && ( ! is_array( $candidate['visual_parts'] ?? null ) || ! array_is_list( $candidate['visual_parts'] ) || count( $candidate['visual_parts'] ) > 128 || ! is_array( $candidate['visual_groups'] ?? null ) || ! array_is_list( $candidate['visual_groups'] ) || count( $candidate['visual_groups'] ) > 128 || ! is_array( $candidate['control_containers'] ?? null ) || ! array_is_list( $candidate['control_containers'] ) || count( $candidate['control_containers'] ) > 128 ) ) || array_filter( $candidate['diagnostics'], static fn( $diagnostic ): bool => ! is_string( $diagnostic ) || '' === trim( $diagnostic ) || strlen( $diagnostic ) > 1100 ) ) {
 			return array( 'error' => 'presentation_graph must be a complete bounded generic/computed-form-presentation/v1 or v2 graph.' );
 		}
 		$properties = self::form_presentation_properties();
@@ -1870,7 +1874,7 @@ class Static_Site_Importer_Entity_Materializer_Registry {
 
 	/** @param array<string,string> $properties @return array{role?:array<string,mixed>,error?:string} */
 	private static function normalize_form_presentation_role( mixed $candidate, array $properties, ?array $condition, bool $allow_empty = false ): array {
-		if ( ! is_array( $candidate ) || count( $candidate ) !== 2 || ! self::has_only_keys( $candidate, array( 'styles', 'provenance' ) ) || ! is_array( $candidate['styles'] ?? null ) || ( ! $allow_empty && empty( $candidate['styles'] ) ) || ! is_array( $candidate['provenance'] ?? null ) || count( $candidate['provenance'] ) > 16 ) {
+		if ( ! is_array( $candidate ) || count( $candidate ) !== 2 || ! self::has_only_keys( $candidate, array( 'styles', 'provenance' ) ) || ! is_array( $candidate['styles'] ?? null ) || ( ! $allow_empty && empty( $candidate['styles'] ) ) || ! is_array( $candidate['provenance'] ?? null ) || count( $candidate['provenance'] ) > 32 ) {
 			return array( 'error' => 'presentation_graph role facts are malformed.' );
 		}
 		foreach ( $candidate['styles'] as $key => $value ) {

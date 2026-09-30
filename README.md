@@ -14,6 +14,8 @@ Build a production-shaped development ZIP using immutable Blocks Engine source w
 npm run build:dev-package -- --blocks-engine-path ../blocks-engine --blocks-engine-ref origin/trunk
 ```
 
+To test an unreleased Blocks Engine change, point `--blocks-engine-path` at that checkout and omit `--blocks-engine-ref`: the package then uses the checkout's `HEAD`, and the build refuses to run while `php-transformer/` or `figma-transformer/` have uncommitted changes, because only committed bytes are packaged. With neither option, `../blocks-engine` at `origin/trunk` is used.
+
 The command resolves the requested ref once, archives `php-transformer/` and `figma-transformer/` from that commit into an isolated temporary snapshot, installs production dependencies there, and delegates ZIP assembly to `homeboy review build`. The ZIP and adjacent provenance JSON are written to `build/`. Use `--output-dir <path>` to select another destination. The receipt records SSI `HEAD`, a dirty worktree identity when present, the Blocks Engine ref and SHA, Composer lock digest, ZIP digest, and schema version.
 
 ## Runtime package profiles
@@ -93,14 +95,16 @@ When a generated artifact contains full-document HTML, Static Site Importer rout
 - Generates a block theme with shared header/footer template parts, `core/post-content` templates, page patterns for reusable/reference artifacts, `theme.json`, `style.css`, and optional `assets/site.js`.
 - Rewrites local `.html` links to the imported WordPress page permalinks.
 - Creates deterministic `wp_navigation` posts for supported header/footer navigation and references them from generated template parts.
+- Consumes producer-owned `explicit_refs/v1` navigation references, validates all declarations before writes, and binds IDs before page persistence. Full destinations, submenu structure and authored item presentation stay producer-owned; SSI performs no inline-menu signature matching. Navigation uses explicit post-type reconciliation, participates in rollback, and is exposed in `materialization_receipt.completed.navigation_entities`.
 - Keeps imported pages native and editor-visible; page content belongs to WordPress pages while the generated theme owns shared chrome, background decoration, styles, scripts, and template wrappers.
+- Keeps nested shared chrome references at their original positions inside page-owned layout containers. One template part owns the shared content while its occurrences preserve authored containment and order.
 - Optionally activates the generated theme and assigns the imported `index.html` page as the front page when that page exists.
 - Names the generated theme from the resolved imported site title unless the caller supplies an explicit name.
 - Removes untouched WordPress installation content (`Hello world!`, `Sample Page`, and the sample comment) from fresh sites by default.
 
 ## Requirements
 
-- WordPress 6.6 or later.
+- WordPress 7.1 or later.
 - PHP 8.2 or later.
 - Composer dependencies installed with `composer install`.
 - Node dependencies installed only when running the JavaScript block-validation smoke tests.
@@ -318,6 +322,90 @@ The export envelope includes:
 - `import-report.json` and `source-documents.json` metadata files when the exported theme has SSI import provenance.
 
 The default root is `website` with `entrypoint: "website/index.html"`. Callers can pass any safe single-segment root with a matching entrypoint, such as `root: "artifact"` and `entrypoint: "artifact/index.html"`. The import ability accepts the same canonical website artifact through `artifact`.
+
+## URL Loop Intake
+
+The bounded URL entrypoint retains one fresh Data Liberation Agent capture, then
+passes that exact generated-artifact tree through SSI's existing fixture intake.
+It never interprets fallback counts as solved-site acceptance and does not run a
+matrix unless explicitly requested:
+
+```bash
+node tools/url-loop-intake.mjs https://quinn-fluid-demo.squarespace.com/ \
+  --output-root /path/to/retained/quinn-capture \
+  --run-matrix --static-site-importer /path/to/static-site-importer \
+  --blocks-engine /path/to/blocks-engine
+```
+
+The entrypoint configures the pinned DLA v0.6.5 asset and invokes
+`npx --yes --package=<asset> data-liberation <url> --output <dir>`. The operator
+supplies only the URL on later runs. The resulting `url-loop-handoff.json` records
+derived SHA256 provenance for the normalized URL, receipt bytes, and retained
+capture content, plus the capture receipt,
+observed component identities, normalized fixture, canonical matrix summary and
+artifact references when requested, stage failures, and replay commands. A capture receipt must be
+`data-liberation/capture-receipt/v1`, with `source.url` bound to the normalized
+URL and a complete route summary (`routesCaptured === routesDiscovered`, with no
+failed or skipped routes). Ambiguous artifact directories, partial captures,
+missing files, and missing declared release identity are blocked before SSI intake. A complete capture
+without a requested matrix is `needs_evaluation`; matrix evidence is accepted only
+when the selected fixture is explicitly `verified` in the canonical runtime
+evidence summary. WordPress/editor evidence remains owned by the existing fixture
+matrix and is required by solved-site promotion; this entrypoint never claims solved
+status.
+
+### Durable, bounded evaluation
+
+`tools/url-loop-controller.mjs` composes this capture with Homeboy's generic
+`run_command` WorkJobs. Run it **inside a dependency-hydrated Lab workspace**
+with the installed Homeboy controller and a WP Codebox binary that supports the
+fixture-matrix browser steps:
+
+```bash
+node tools/url-loop-controller.mjs start \
+  --url https://quinn-fluid-demo.squarespace.com/ \
+  --blocks-engine /path/to/blocks-engine \
+  --transformer-path /path/to/pinned/php-transformer \
+  --wp-codebox-bin /path/to/wp-codebox \
+  --candidate-sha <full-40-character-commit> \
+  --output-root /path/to/retained/loop \
+  --max-actions 4
+homeboy agent-task loop status ssi-url-e40fb1ae670f7b0acf36
+```
+
+Configure `SSI_BLOCKS_ENGINE_PATH`, `HOMEBOY_WP_CODEBOX_BIN`, and (when the
+synced workspace has no `.git`) `SSI_CANDIDATE_SHA` on the Lab runner to make
+`start --url <url>` the only per-site input.
+For independent proof runs of the same source, `--instance <token>` forks the
+controller identity while retaining the stable `source_id` in its handoff.
+
+The first action retains DLA's source capture and normalized SSI fixture. The
+second runs the canonical WordPress/Codebox matrix and records its typed browser
+findings and component inputs. Homeboy owns the durable action history, event and
+revolution budget; SSI owns the evidence/acceptance decision. A subsequent
+candidate SHA can queue **one deduplicated re-evaluation of that same capture**:
+
+```bash
+node tools/url-loop-controller.mjs candidate \
+  --output-root /path/to/retained/loop \
+  --candidate-sha <full-40-character-commit> \
+  --candidate-workspace /path/to/clean/candidate-checkout
+```
+
+The controller stops on a typed capture/matrix blocker or its action budget.
+`--candidate-sha` is required when Lab sync has no `.git` metadata; the operator
+can omit it for an ordinary Git checkout. Pin the Blocks Engine candidate with
+`--blocks-engine-sha` and WordPress with `--wordpress-version` when known.
+Candidate events require a clean checkout whose `HEAD` matches the supplied SHA;
+the re-evaluation action then verifies it again before running the matrix. A Lab
+snapshot without Git metadata remains usable for initial diagnostic collection,
+but its candidate revision stays visibly unverified and cannot earn acceptance.
+Matrix quality findings remain actionable, but neither zero fallback blocks nor
+completed browser steps imply a solved site. A solved verdict requires SSI's
+separate fail-closed solved-site promotion receipt and full viewport/editor
+evidence; this first vertical records absent evidence explicitly. `spec` instead
+of `start` prints the generated controller spec for `homeboy agent-task
+controller plan -` without creating controller state.
 
 ## Product Handoff Contract
 

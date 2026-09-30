@@ -306,6 +306,7 @@ class Static_Site_Importer_Companion_Plugin {
 		if ( false === $config ) {
 			return new WP_Error( 'static_site_importer_companion_plugin_config_invalid', 'Companion configuration could not be encoded as JSON.' );
 		}
+		$files[ $plugin_slug . '/editor/imported-media-replace.js' ]      = self::imported_media_replace_script();
 		$files[ $plugin_slug . '/companion.json' ]                        = $config . "\n";
 		$files[ $plugin_slug . '/includes/provider-form-runtime-v1.php' ] = self::provider_form_runtime_file( $provider_form_runtime, $runtime_class );
 		$files[ $plugin_slug . '/includes/internal-link-runtime.php' ]    = self::internal_link_runtime_file( $internal_link_runtime, $link_runtime_class );
@@ -740,7 +741,7 @@ class Static_Site_Importer_Companion_Plugin {
 		if ( '' !== $update_uri_line ) {
 			$lines[] = $update_uri_line;
 		}
-		$lines[] = ' * Requires at least: 6.9';
+		$lines[] = ' * Requires at least: 7.1';
 		$lines[] = ' * Requires PHP: 8.1';
 		$lines[] = ' * Text Domain: ' . $plugin_slug;
 		$lines[] = ' *';
@@ -828,6 +829,21 @@ class Static_Site_Importer_Companion_Plugin {
 		$lines[] = '}';
 		$lines[] = sprintf( "add_action( 'wp_enqueue_scripts', '%s_enqueue_global_islands' );", $fn_prefix );
 		$lines[] = '';
+		$lines[] = '/** Remove lazy auto-sizes only for SSI-materialized attachment images. */';
+		$lines[] = sprintf( 'function %s_preserve_materialized_image_sizes( $image, $context, $attachment_id ) {', $fn_prefix );
+		$lines[] = "\tif ( ! is_string( \$image ) || (int) \$attachment_id < 1 || ! function_exists( 'get_post_meta' ) || '' === (string) get_post_meta( (int) \$attachment_id, '_static_site_importer_source_asset', true ) ) {";
+		$lines[] = "\t\treturn \$image;";
+		$lines[] = "\t}";
+		$lines[] = "\tif ( ! class_exists( 'WP_HTML_Tag_Processor' ) ) { return \$image; }";
+		$lines[] = "\t\$processor = new WP_HTML_Tag_Processor( \$image );";
+		$lines[] = "\tif ( ! \$processor->next_tag( array( 'tag_name' => 'IMG' ) ) || 'lazy' !== strtolower( (string) \$processor->get_attribute( 'loading' ) ) ) { return \$image; }";
+		$lines[] = "\t\$sizes = \$processor->get_attribute( 'sizes' );";
+		$lines[] = "\tif ( ! is_string( \$sizes ) || ! preg_match( '/^auto,\\s*(.+)$/i', \$sizes, \$matches ) ) { return \$image; }";
+		$lines[] = "\t\$processor->set_attribute( 'sizes', \$matches[1] );";
+		$lines[] = "\treturn \$processor->get_updated_html();";
+		$lines[] = '}';
+		$lines[] = sprintf( "add_filter( 'wp_content_img_tag', '%s_preserve_materialized_image_sizes', 10, 3 );", $fn_prefix );
+		$lines[] = '';
 
 		$lines[] = '/** Register and enqueue declared editor-only scripts. */';
 		$lines[] = sprintf( 'function %s_enqueue_editor_scripts() {', $fn_prefix );
@@ -847,10 +863,65 @@ class Static_Site_Importer_Companion_Plugin {
 		$lines[] = "\t\twp_register_script( \$handle, plugin_dir_url( __FILE__ ) . \$src, \$dependencies, '1.0.0', true );";
 		$lines[] = "\t\twp_enqueue_script( \$handle );";
 		$lines[] = "\t}";
+		$lines[] = "\twp_enqueue_script( 'ssi-imported-media-replace', plugin_dir_url( __FILE__ ) . 'editor/imported-media-replace.js', array( 'wp-blocks', 'wp-block-editor', 'wp-element', 'wp-components', 'wp-hooks' ), '1', true );";
 		$lines[] = '}';
 		$lines[] = sprintf( "add_action( 'enqueue_block_editor_assets', '%s_enqueue_editor_scripts' );", $fn_prefix );
 		$lines[] = '';
 		return implode( "\n", $lines );
+	}
+
+	/**
+	 * Editor control that replaces one imported image without rewriting the block.
+	 *
+	 * Page photos that cannot be a core/image still carry `wp-image-{id}` in
+	 * their saved markup. The toolbar swaps that image and saves the new URL.
+	 */
+	private static function imported_media_replace_script(): string {
+		return <<<'JS'
+( function( wp ) {
+	if ( ! wp || ! wp.hooks || ! wp.blockEditor || ! wp.element || ! wp.components ) {
+		return;
+	}
+	var createElement = wp.element.createElement;
+	wp.hooks.addFilter( 'editor.BlockEdit', 'static-site-importer/imported-media-replace', function( BlockEdit ) {
+		return function( props ) {
+			var content = props && props.attributes && typeof props.attributes.content === 'string' ? props.attributes.content : '';
+			var marks = content.match( /wp-image-\d+/g );
+			if ( ! marks || 1 !== marks.length ) {
+				return createElement( BlockEdit, props );
+			}
+			var currentId = parseInt( marks[0].replace( 'wp-image-', '' ), 10 );
+			return createElement( wp.element.Fragment, null,
+				createElement( wp.blockEditor.BlockControls, null,
+					createElement( wp.blockEditor.MediaUpload, {
+						allowedTypes: [ 'image' ],
+						value: currentId,
+						onSelect: function( media ) {
+							if ( ! media || ! media.url || ! media.id ) {
+								return;
+							}
+							var next = content.replace( /(<img\b[^>]*\bsrc=")[^"]*(")/i, function( matched, start, end ) {
+								return start + media.url + end;
+							} );
+							next = next.replace( /wp-image-\d+/, 'wp-image-' + media.id );
+							var attrs = { content: next };
+							if ( typeof props.attributes.id === 'number' ) {
+								attrs.id = media.id;
+							}
+							props.setAttributes( attrs );
+						},
+						render: function( controls ) {
+							var open = controls && controls.open ? controls.open : null;
+							return createElement( wp.components.ToolbarButton, { onClick: open, label: 'Replace image' }, 'Replace' );
+						}
+					} )
+				),
+				createElement( BlockEdit, props )
+			);
+		};
+	} );
+} )( window.wp );
+JS;
 	}
 
 	/**

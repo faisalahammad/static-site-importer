@@ -329,6 +329,9 @@ class Static_Site_Importer_Form_Seeder {
 		$controls    = isset( $form['controls'] ) && is_array( $form['controls'] ) ? $form['controls'] : array();
 		$form        = self::project_submit_style_into_presentation_graph( $form, $controls );
 		$form        = self::project_textarea_row_height_into_presentation_graph( $form, $controls );
+		$released    = self::release_visually_hidden_native_controls( $form, $controls );
+		$form        = $released['form'];
+		$controls    = $released['controls'];
 		$selector    = isset( $form['selector'] ) && is_scalar( $form['selector'] ) ? (string) $form['selector'] : '';
 		$source_path = isset( $form['source_path'] ) && is_scalar( $form['source_path'] ) ? (string) $form['source_path'] : '';
 
@@ -339,23 +342,20 @@ class Static_Site_Importer_Form_Seeder {
 		$mapped_types                  = array();
 		$submit_text                   = 'Submit';
 		$skipped                       = array();
+		$unsupported_capabilities      = array();
 		$control_attribute_losses      = array();
 		$has_topology                  = isset( $form['control_topology'] );
 		$has_source_submit             = false;
 		$textarea_height_omitted_count = (int) ( $form['form']['textarea_height_omitted_count'] ?? 0 );
 		$radio_groups                  = Static_Site_Importer_Form_Field_Markup::labelled_radio_groups( $form, $controls );
 		$suppressed_controls           = $radio_groups['suppressed_controls'];
-		if ( ! empty( $form['form']['interleaved_context'] ) ) {
-			return array(
-				'selector'       => $selector,
-				'source_path'    => $source_path,
-				'provider'       => self::PROVIDER_ID,
-				'block_name'     => 'jetpack/contact-form',
-				'status'         => 'skipped',
-				'reason'         => 'interleaved_context_unrepresentable',
-				'runtime_mapped' => false,
-			);
+		$choice_pairs                  = self::linked_choice_pairs( $controls, $form );
+		foreach ( $choice_pairs as $trigger => $carrier ) {
+			$suppressed_controls[ $carrier ] = true;
 		}
+		// Context is editable content, not a reason to decline the provider form.
+		// Keep supported fields in Jetpack and project bounded before/after copy
+		// as editable core blocks within the provider form (see context_blocks).
 		$submit_presentation = isset( $form['form']['submit_presentation'] ) && is_array( $form['form']['submit_presentation'] ) ? $form['form']['submit_presentation'] : array();
 		if ( is_string( $submit_presentation['text'] ?? null ) && '' !== trim( $submit_presentation['text'] ) ) {
 			$submit_text = trim( $submit_presentation['text'] );
@@ -364,6 +364,15 @@ class Static_Site_Importer_Form_Seeder {
 		foreach ( $controls as $control_index => $control ) {
 			if ( ! is_array( $control ) ) {
 				continue;
+			}
+			if ( isset( $choice_pairs[ $control_index ] ) ) {
+				$carrier         = $controls[ $choice_pairs[ $control_index ] ];
+				$control         = array_merge( $carrier, array_intersect_key( $control, array_flip( array( 'label', 'label_class', 'required_text', 'required_indicator', 'description' ) ) ) );
+				$control['tag']  = 'select';
+				$control['type'] = 'select';
+				// The source carrier was hidden; its class cannot follow the new
+				// visitor-facing provider input.
+				unset( $control['class'] );
 			}
 			$type = strtolower( trim( (string) ( $control['type'] ?? '' ) ) );
 			$tag  = strtolower( trim( (string) ( $control['tag'] ?? '' ) ) );
@@ -430,7 +439,23 @@ class Static_Site_Importer_Form_Seeder {
 			}
 
 			$control_phone_destinations = $presentation_descriptor['phone_destinations'];
-			$field_block                = Static_Site_Importer_Form_Field_Markup::field_block_from_control(
+			if ( 'file' === $type && 'input' === $tag ) {
+				$label                          = Static_Site_Importer_Form_Field_Markup::control_text( $control );
+				$field_blocks[ $control_index ] = array(
+					'name'    => 'core/paragraph',
+					'attrs'   => array( 'className' => 'ssi-unsupported-file-upload' ),
+					'content' => trim( $label . ' — File upload requires Jetpack connection and a supported plan; unavailable in this import runtime.' ),
+					'wrapper' => 'paragraph',
+				);
+				$skipped[]                      = 'file';
+				$unsupported_capabilities[]     = array(
+					'capability'    => 'file_upload',
+					'reason_code'   => 'jetpack_upload_endpoint_requires_connected_site_and_supported_plan',
+					'control_index' => $control_index,
+				);
+				continue;
+			}
+			$field_block = Static_Site_Importer_Form_Field_Markup::field_block_from_control(
 				$tag,
 				$type,
 				$control,
@@ -462,6 +487,19 @@ class Static_Site_Importer_Form_Seeder {
 			$field_source_class                = $has_provider_input ? '' : $source_class;
 			$layout_hook                       = Static_Site_Importer_Form_Layout_Projection::layout_node_class( $scope, 'control-' . $control_index );
 			$field_block['attrs']['className'] = trim( $field_source_class . ' ' . $layout_hook );
+			if ( isset( $choice_pairs[ $control_index ] ) ) {
+				$choice_token = Static_Site_Importer_Provider_Form_Runtime_V1::choice_token( $control['options'] );
+				if ( '' === $choice_token ) {
+					$control_attribute_losses[] = array(
+						'dimension'     => 'control',
+						'reason_code'   => 'unsupported_control_attribute',
+						'attribute'     => 'choice_values',
+						'control_index' => $control_index,
+					);
+				} else {
+					$field_block['attrs']['className'] .= ' ' . $choice_token;
+				}
+			}
 			// Jetpack replaces a date field's class with `jp-contact-form-date`
 			// before deriving wrap classes, so the field-level layout hook never
 			// reaches the shell. Keep that hook on the inner input, which Jetpack
@@ -544,8 +582,16 @@ class Static_Site_Importer_Form_Seeder {
 				'omitted_count' => $textarea_height_omitted_count,
 			);
 		}
-		$host = Static_Site_Importer_Form_Layout_Projection::host_wrapper_projection( $form );
-		self::append_receipt_entries( $layout['receipt'], 'operations', array_merge( $radio_groups['operations'], $topology['operations'], $host['operations'] ) );
+		$host              = Static_Site_Importer_Form_Layout_Projection::host_wrapper_projection( $form );
+		$choice_operations = array();
+		foreach ( $choice_pairs as $trigger => $carrier ) {
+			$choice_operations[] = array(
+				'dimension'   => 'control',
+				'strategy'    => 'provider_linked_native_choice',
+				'target_hash' => hash( 'sha256', 'control-' . $trigger . ':control-' . $carrier ),
+			);
+		}
+		self::append_receipt_entries( $layout['receipt'], 'operations', array_merge( $released['operations'], $radio_groups['operations'], $choice_operations, $topology['operations'], $host['operations'] ) );
 		self::append_receipt_entries( $layout['receipt'], 'losses', $control_attribute_losses );
 		$inner_blocks           = $layout['blocks'];
 		$form_attrs             = Static_Site_Importer_Form_Field_Markup::contact_form_attributes( $form, $scope, array_merge( $topology['form_classes'], $host['classes'] ) );
@@ -665,21 +711,42 @@ class Static_Site_Importer_Form_Seeder {
 		foreach ( array_keys( $suppressed_controls ) as $control_index ) {
 			unset( $overlay_form['presentation_graph']['controls'][ $control_index ] );
 		}
+		foreach ( is_array( $topology['grid_span_submit_controls'] ?? null ) ? $topology['grid_span_submit_controls'] : array() as $span_control ) {
+			if ( ! is_array( $overlay_form['presentation_graph'] ?? null ) ) {
+				continue;
+			}
+			foreach ( $overlay_form['presentation_graph']['controls'] ?? array() as $row_index => $control_row ) {
+				if ( ! is_array( $control_row ) || ( $control_row['index'] ?? $row_index ) !== $span_control ) {
+					continue;
+				}
+				unset( $overlay_form['presentation_graph']['controls'][ $row_index ]['control']['styles']['width'], $overlay_form['presentation_graph']['controls'][ $row_index ]['control']['styles']['min_width'] );
+			}
+			foreach ( $overlay_form['presentation_graph']['variants'] ?? array() as $variant_index => $variant ) {
+				if ( ! is_array( $variant ) || ( $variant['index'] ?? null ) !== $span_control || 'control' !== ( $variant['role'] ?? null ) || ! is_array( $variant['style_patch'] ?? null ) ) {
+					continue;
+				}
+				unset( $overlay_form['presentation_graph']['variants'][ $variant_index ]['style_patch']['width'], $overlay_form['presentation_graph']['variants'][ $variant_index ]['style_patch']['min_width'] );
+			}
+		}
 		$visual_state           = Static_Site_Importer_Form_Layout_Projection::empty_country_visual_state( $form, $scope, $topology['phone_popup_targets'] );
 		$target_map             = Static_Site_Importer_Form_Layout_Projection::provider_layout_target_map( $overlay_form, $scope, $presentation_descriptors, $box_targets, $topology['phone_popup_targets'], $visual_state['trigger_class'] ?? '' );
 		$presentation_graph     = is_array( $overlay_form['presentation_graph'] ?? null ) ? $overlay_form['presentation_graph'] : array();
 		$container_presentation = is_array( $form['form']['container_presentation'] ?? null ) ? $form['form']['container_presentation'] : array();
+		$context_fallbacks      = Static_Site_Importer_Form_Field_Markup::context_style_fallbacks( is_array( $form['form'] ?? null ) ? $form['form'] : array() );
 		// The captured form box's own padding/margin/etc. is bounded, source-CSS-cascade
 		// evidence carried the same way every other captured control already is (see
 		// Provider_Layout_Overlay's `generic/form-container-presentation/v1` destination).
 		// It belongs on the rendered page, not only inside editor chrome, so the frontend
 		// compile also receives it.
-		$overlay        = Static_Site_Importer_Provider_Layout_Overlay::compile( $overlay_graph, $target_map, $presentation_graph, $container_presentation );
+		$overlay        = Static_Site_Importer_Provider_Layout_Overlay::compile( $overlay_graph, $target_map, $presentation_graph, $container_presentation, false, $context_fallbacks );
 		$overlay        = Static_Site_Importer_Form_Layout_Projection::collapse_inactive_provider_errors( $overlay, $scope, $mapped_types );
 		$editor_map     = Static_Site_Importer_Form_Layout_Projection::editor_layout_target_map( $target_map, $scope );
-		$editor_overlay = Static_Site_Importer_Provider_Layout_Overlay::compile( $overlay_graph, $editor_map, $presentation_graph, $container_presentation, true );
+		$editor_overlay = Static_Site_Importer_Provider_Layout_Overlay::compile( $overlay_graph, $editor_map, $presentation_graph, $container_presentation, true, $context_fallbacks );
 		if ( isset( $editor_overlay['overlay']['editor_css'] ) ) {
-			foreach ( array( 'editor_css', 'editor_sha256', 'editor_bytes' ) as $key ) {
+			foreach ( array( 'editor_css', 'editor_sha256', 'editor_bytes', 'context_css', 'context_sha256', 'context_bytes', 'editor_context_css', 'editor_context_sha256', 'editor_context_bytes' ) as $key ) {
+				if ( ! array_key_exists( $key, $editor_overlay['overlay'] ) ) {
+					continue;
+				}
 				$overlay['overlay'][ $key ] = $editor_overlay['overlay'][ $key ];
 			}
 		}
@@ -740,28 +807,18 @@ class Static_Site_Importer_Form_Seeder {
 			'provider_layout_target_map'  => $target_map,
 			'provider_layout_overlay_css' => $overlay['overlay'],
 		);
+		if ( ! empty( $unsupported_capabilities ) ) {
+			$row['unsupported_capabilities'] = $unsupported_capabilities;
+		}
 		if ( ! empty( $visual_state['state'] ) ) {
 			$row['form_visual_state'] = $visual_state['state'];
 		}
 		if ( ! empty( $visual_state['diagnostics'] ) ) {
 			$row['form_visual_state_diagnostics'] = $visual_state['diagnostics'];
 		}
-		$unaccepted_losses   = array_values(
-			array_filter(
-				$layout['receipt']['losses'] ?? array(),
-				static fn( $loss ): bool => is_array( $loss ) && self::receipt_loss_requires_gate( $loss ) && ! self::provider_represents_receipt_loss( $loss, $form, $field_blocks, $target_map ) && true !== apply_filters( 'static_site_importer_form_receipt_loss_accepted', false, $loss, $form, $row )
-			)
-		);
-		$gate_overflow_count = (int) ( $layout['receipt']['gate_required_loss_overflow_count'] ?? 0 );
-		if ( $gate_overflow_count > 0 ) {
-			$unaccepted_losses[] = array(
-				'dimension'   => 'topology',
-				'reason_code' => 'form_receipt_gate_loss_overflow',
-				'loss_count'  => $gate_overflow_count,
-				'loss_hash'   => (string) ( $layout['receipt']['gate_required_loss_overflow_hash'] ?? '' ),
-			);
-		}
-		if ( ! empty( $unaccepted_losses ) ) {
+		$mapping_decision        = self::mapping_decision( $form, $row, $mapped_types, $skipped, $layout['receipt'], $field_blocks, $target_map );
+		$row['mapping_decision'] = $mapping_decision;
+		if ( 'declined' === $mapping_decision['status'] ) {
 			// The layout-fidelity gate is a decision not to represent this one form
 			// with the provider, exactly like an unsupported control topology. The
 			// converted source form stays in the page, so this is a per-entity
@@ -770,10 +827,42 @@ class Static_Site_Importer_Form_Seeder {
 			$row['runtime_mapped']                 = false;
 			$row['status']                         = 'skipped';
 			$row['reason']                         = 'form_receipt_loss_unaccepted';
-			$row['form_receipt_unaccepted_losses'] = $unaccepted_losses;
-			$row['unaccepted_receipt_loss_count']  = count( $unaccepted_losses );
+			$row['form_receipt_unaccepted_losses'] = $mapping_decision['losses'];
+			$row['unaccepted_receipt_loss_count']  = count( $mapping_decision['losses'] );
 		}
 		return $row;
+	}
+
+	/**
+	 * Decide provider support from the prepared row and bounded receipt evidence.
+	 *
+	 * The filter receives the complete pre-decision emission row, including its
+	 * original computed receipt and provider overlay, as it did before extraction.
+	 *
+	 * @return array<string,mixed>
+	 */
+	private static function mapping_decision( array $form, array $row, array $mapped_types, array $skipped, array $receipt, array $field_blocks, array $target_map ): array {
+		$unaccepted_losses   = array_values(
+			array_filter(
+				$receipt['losses'] ?? array(),
+				static fn( $loss ): bool => is_array( $loss ) && self::receipt_loss_requires_gate( $loss ) && ! self::provider_represents_receipt_loss( $loss, $form, $field_blocks, $target_map ) && true !== apply_filters( 'static_site_importer_form_receipt_loss_accepted', false, $loss, $form, $row )
+			)
+		);
+		$gate_overflow_count = (int) ( $receipt['gate_required_loss_overflow_count'] ?? 0 );
+		if ( $gate_overflow_count > 0 ) {
+			$unaccepted_losses[] = array(
+				'dimension'   => 'topology',
+				'reason_code' => 'form_receipt_gate_loss_overflow',
+				'loss_count'  => $gate_overflow_count,
+				'loss_hash'   => (string) ( $receipt['gate_required_loss_overflow_hash'] ?? '' ),
+			);
+		}
+		return array(
+			'status'                   => empty( $unaccepted_losses ) ? 'mapped' : 'declined',
+			'supported_fields'         => array_values( $mapped_types ),
+			'unsupported_capabilities' => array_values( array_unique( array_filter( $skipped ) ) ),
+			'losses'                   => $unaccepted_losses,
+		);
 	}
 
 	/**
@@ -812,6 +901,179 @@ class Static_Site_Importer_Form_Seeder {
 		}
 		ksort( $owned );
 		return array_slice( array_values( $owned ), 0, 4 );
+	}
+
+	/**
+	 * Pair only a producer-linked visible choice trigger with its native select in
+	 * the same field shell. The carrier is suppressed only after the trigger can
+	 * stand in for the complete option list as a provider select.
+	 *
+	 * @return array<int,int> Trigger index to carrier index.
+	 */
+	private static function linked_choice_pairs( array $controls, array $form ): array {
+		$parents = array();
+		foreach ( $form['control_topology']['nodes'] ?? array() as $node ) {
+			if ( is_array( $node ) && 'control' === ( $node['kind'] ?? null ) && is_int( $node['control'] ?? null ) ) {
+				$parents[ $node['control'] ] = $node['parent'] ?? null;
+			}
+		}
+		$pairs = array();
+		$used  = array();
+		foreach ( $controls as $index => $trigger ) {
+			if ( ! is_array( $trigger ) || 'button' !== ( $trigger['tag'] ?? null ) || 'combobox' !== ( $trigger['role'] ?? null ) || ! is_string( $trigger['choice_source_selector'] ?? null ) || '' === trim( $trigger['choice_source_selector'] ) || ! isset( $parents[ $index ] ) ) {
+				continue;
+			}
+			$carrier_index = $index + 1;
+			$carrier       = $controls[ $carrier_index ] ?? null;
+			if ( ! is_array( $carrier ) || 'select' !== ( $carrier['tag'] ?? null ) || ( $carrier['selector'] ?? null ) !== $trigger['choice_source_selector'] || ( $parents[ $carrier_index ] ?? null ) !== $parents[ $index ] || isset( $used[ $carrier_index ] ) || empty( $carrier['options'] ) || ! isset( $trigger['options'] ) || $carrier['options'] !== $trigger['options'] ) {
+				continue;
+			}
+			$pairs[ $index ]        = $carrier_index;
+			$used[ $carrier_index ] = true;
+		}
+		return $pairs;
+	}
+
+	/**
+	 * Drop source visually-hidden presentation before provider destinations are built.
+	 *
+	 * A source hides its native input (absolute or fixed, a 1px-or-smaller box, and
+	 * either a collapsing clip or a -1px margin) because a sibling paints the visible
+	 * box. The provider emits its own native control and does not reproduce that
+	 * sibling, so those declarations would hide the only remaining control. Detection
+	 * reads declared styles only; a measured box is not evidence. Label roles stay.
+	 *
+	 * @param array<string,mixed> $form     Provider form manifest row.
+	 * @param array<int,mixed>    $controls Normalized controls list.
+	 * @return array{form:array<string,mixed>,controls:array<int,mixed>,operations:array<int,array<string,mixed>>}
+	 */
+	private static function release_visually_hidden_native_controls( array $form, array $controls ): array {
+		$operations = array();
+		$hidden     = array();
+		foreach ( $form['presentation_graph']['controls'] ?? array() as $row ) {
+			if ( ! is_array( $row ) || ! is_int( $row['index'] ?? null ) || ! is_array( $row['control']['styles'] ?? null ) || ! self::is_visually_hidden_control_declaration( $row['control']['styles'] ) ) {
+				continue;
+			}
+			$hidden[ $row['index'] ] = true;
+		}
+		if ( empty( $hidden ) ) {
+			return array(
+				'form'       => $form,
+				'controls'   => $controls,
+				'operations' => $operations,
+			);
+		}
+		foreach ( array_keys( $hidden ) as $index ) {
+			if ( isset( $controls[ $index ] ) && is_array( $controls[ $index ] ) ) {
+				unset( $controls[ $index ]['class'] );
+			}
+			if ( isset( $form['controls'][ $index ] ) && is_array( $form['controls'][ $index ] ) ) {
+				unset( $form['controls'][ $index ]['class'] );
+			}
+			$operations[] = array(
+				'dimension' => 'presentation',
+				'strategy'  => 'provider_visually_hidden_native_control',
+				'node_hash' => hash( 'sha256', 'control-' . $index ),
+			);
+		}
+		if ( is_array( $form['presentation_graph']['controls'] ?? null ) ) {
+			$kept_controls = array();
+			foreach ( $form['presentation_graph']['controls'] as $row ) {
+				if ( ! is_array( $row ) || ! isset( $hidden[ $row['index'] ?? null ] ) ) {
+					$kept_controls[] = $row;
+					continue;
+				}
+				unset( $row['control'] );
+				if ( isset( $row['label'] ) || isset( $row['required_marker'] ) ) {
+					$kept_controls[] = $row;
+				}
+			}
+			$form['presentation_graph']['controls'] = $kept_controls;
+		}
+		if ( is_array( $form['presentation_graph']['variants'] ?? null ) ) {
+			$form['presentation_graph']['variants'] = array_values(
+				array_filter(
+					$form['presentation_graph']['variants'],
+					static fn ( $variant ): bool => ! is_array( $variant ) || 'control' !== ( $variant['role'] ?? null ) || ! isset( $hidden[ $variant['index'] ?? null ] )
+				)
+			);
+		}
+		if ( is_array( $form['layout_graph']['nodes'] ?? null ) ) {
+			$form['layout_graph']['nodes'] = array_values(
+				array_filter(
+					$form['layout_graph']['nodes'],
+					static function ( $node ) use ( $hidden ): bool {
+						if ( ! is_array( $node ) || ! is_string( $node['id'] ?? null ) || 1 !== preg_match( '/^control-([0-9]+)$/D', $node['id'], $match ) ) {
+							return true;
+						}
+						return ! isset( $hidden[ (int) $match[1] ] );
+					}
+				)
+			);
+		}
+		if ( is_array( $form['layout_graph']['variants'] ?? null ) ) {
+			$form['layout_graph']['variants'] = array_values(
+				array_filter(
+					$form['layout_graph']['variants'],
+					static function ( $variant ) use ( $hidden ): bool {
+						if ( ! is_array( $variant ) || ! is_string( $variant['node'] ?? null ) || 1 !== preg_match( '/^control-([0-9]+)$/D', $variant['node'], $match ) ) {
+							return true;
+						}
+						return ! isset( $hidden[ (int) $match[1] ] );
+					}
+				)
+			);
+		}
+		return array(
+			'form'       => $form,
+			'controls'   => $controls,
+			'operations' => $operations,
+		);
+	}
+
+	/**
+	 * Whether declared styles hide a native control that a sibling box was painting.
+	 *
+	 * @param array<string,mixed> $styles Control presentation declarations.
+	 */
+	private static function is_visually_hidden_control_declaration( array $styles ): bool {
+		$position = strtolower( trim( (string) ( $styles['position'] ?? '' ) ) );
+		if ( ! in_array( $position, array( 'absolute', 'fixed' ), true ) || ! self::is_collapsed_declared_box( $styles['width'] ?? null ) || ! self::is_collapsed_declared_box( $styles['height'] ?? null ) ) {
+			return false;
+		}
+		return self::declaration_has_collapsing_clip( $styles ) || self::declaration_has_negative_pixel_margin( $styles );
+	}
+
+	/** @param mixed $value Declared box length. */
+	private static function is_collapsed_declared_box( mixed $value ): bool {
+		if ( ! is_string( $value ) || 1 !== preg_match( '/^(?:0|[0-9]+(?:\.[0-9]+)?)(?:px)?$/D', strtolower( trim( $value ) ) ) ) {
+			return false;
+		}
+		return (float) $value <= 1.0;
+	}
+
+	/** @param array<string,mixed> $styles */
+	private static function declaration_has_negative_pixel_margin( array $styles ): bool {
+		foreach ( array( 'margin', 'margin_top', 'margin_right', 'margin_bottom', 'margin_left', 'margin_block', 'margin_block_start', 'margin_block_end', 'margin_inline', 'margin_inline_start', 'margin_inline_end' ) as $key ) {
+			if ( ! is_string( $styles[ $key ] ?? null ) ) {
+				continue;
+			}
+			$tokens = preg_split( '/\s+/', strtolower( trim( $styles[ $key ] ) ) );
+			if ( is_array( $tokens ) && array() !== $tokens && array() === array_diff( $tokens, array( '-1px' ) ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** @param array<string,mixed> $styles */
+	private static function declaration_has_collapsing_clip( array $styles ): bool {
+		$clip = strtolower( trim( (string) ( $styles['clip'] ?? '' ) ) );
+		if ( '' !== $clip && 1 === preg_match( '/^rect\(\s*(?:0|0px|1px)(?:\s*,\s*|\s+)(?:0|0px|1px)(?:\s*,\s*|\s+)(?:0|0px|1px)(?:\s*,\s*|\s+)(?:0|0px|1px)\s*\)$/D', $clip ) ) {
+			return true;
+		}
+		$clip_path = strtolower( trim( (string) ( $styles['clip_path'] ?? $styles['clip-path'] ?? '' ) ) );
+		return '' !== $clip_path && 1 === preg_match( '/^inset\(\s*(?:50%|100%)(?:\s+(?:50%|100%)){0,3}\s*\)$/D', $clip_path );
 	}
 
 	/**
@@ -894,8 +1156,15 @@ class Static_Site_Importer_Form_Seeder {
 				// Cascade-resolved facts fill what this capture omits (background from
 				// a utility the style object did not reify). Authored style wins on
 				// conflict: a preflight `padding:0` / `font-weight:inherit` reset is
-				// not the button's own box.
-				$row['control']['styles'] = array_merge( $existing_styles, $flat );
+				// not the button's own box. An authored value that still references
+				// a custom property (`var(--x, unset)`) was never resolved against
+				// the source cascade, so a resolved fact for it wins.
+				$authored                 = array_filter(
+					$flat,
+					static fn ( string $value, string $key ): bool => ! ( str_contains( $value, 'var(' ) && isset( $existing_styles[ $key ] ) && is_string( $existing_styles[ $key ] ) && ! str_contains( $existing_styles[ $key ], 'var(' ) ),
+					ARRAY_FILTER_USE_BOTH
+				);
+				$row['control']['styles'] = array_merge( $existing_styles, $authored );
 				if ( array_intersect_key( $flat, array_flip( array( 'padding_top', 'padding_right', 'padding_bottom', 'padding_left', 'padding_block', 'padding_inline' ) ) ) && ! isset( $flat['padding'] ) ) {
 					unset( $row['control']['styles']['padding'] );
 				}
@@ -1076,6 +1345,21 @@ class Static_Site_Importer_Form_Seeder {
 
 	/** A source label wrapper is carried by the mapped Jetpack field's label child. */
 	private static function provider_represents_receipt_loss( array $loss, array $form, array $field_blocks, array $target_map = array() ): bool {
+		if ( 'provider_native_control_visibility_unrepresentable' === ( $loss['reason_code'] ?? '' ) && is_string( $loss['node_hash'] ?? null ) ) {
+			foreach ( $form['control_topology']['nodes'] ?? array() as $node ) {
+				$index   = is_array( $node ) && 'control' === ( $node['kind'] ?? '' ) && is_int( $node['control'] ?? null ) ? $node['control'] : null;
+				$control = is_int( $index ) ? ( $form['controls'][ $index ] ?? null ) : null;
+				if ( is_array( $node ) && is_int( $index ) && hash( 'sha256', (string) ( $node['id'] ?? '' ) ) === $loss['node_hash'] && is_array( $control ) && 'file' === strtolower( trim( (string) ( $control['type'] ?? '' ) ) ) && 'core/paragraph' === ( $field_blocks[ $index ]['name'] ?? '' ) ) {
+					return true;
+				}
+			}
+		}
+		if ( 'unsupported_control_unrepresentable' === ( $loss['reason_code'] ?? '' ) && is_int( $loss['control_index'] ?? null ) ) {
+			$control = $form['controls'][ $loss['control_index'] ] ?? null;
+			if ( is_array( $control ) && 'file' === strtolower( trim( (string) ( $control['type'] ?? '' ) ) ) && 'core/paragraph' === ( $field_blocks[ $loss['control_index'] ]['name'] ?? '' ) ) {
+				return true;
+			}
+		}
 		if ( 'provider_wrapper_layout_unrepresentable' === ( $loss['reason_code'] ?? '' ) && is_string( $loss['node_hash'] ?? null ) ) {
 			$targets = is_array( $target_map['targets'] ?? null ) ? $target_map['targets'] : array();
 			foreach ( $targets as $target ) {

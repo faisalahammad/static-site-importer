@@ -112,12 +112,74 @@ final class Static_Site_Importer_Provider_Form_Runtime_V1 {
 		}
 		self::$registered = true;
 		add_filter( 'grunion_contact_form_field_html', array( __CLASS__, 'project_wrapper_classes' ) );
+		add_filter( 'grunion_contact_form_field_html', array( __CLASS__, 'project_choice_values' ), 30 );
 		add_filter( 'grunion_contact_form_field_html', array( __CLASS__, 'project_empty_country_visual_state' ), 20 );
 		add_filter( 'render_block_jetpack/contact-form', array( __CLASS__, 'project_form_container_placement' ), 5, 2 );
 		add_filter( 'render_block_jetpack/contact-form', array( __CLASS__, 'project_field_list_wrapper' ), 6, 2 );
 		add_filter( 'render_block_jetpack/contact-form', array( __CLASS__, 'project_plain_root_fieldset' ), 10, 2 );
 		add_filter( 'render_block_core/button', array( __CLASS__, 'project_submit_presentation' ), 10, 2 );
 		add_filter( 'shortcode_atts_contact-field', array( __CLASS__, 'project_help_text_attribute' ), 10, 3 );
+	}
+
+	/** Encode source label/value pairs in the editable field's persisted class attribute. */
+	public static function choice_token( mixed $options ): string {
+		if ( ! is_array( $options ) || ! array_is_list( $options ) || count( $options ) < 1 || count( $options ) > 32 ) {
+			return '';
+		}
+		$values         = array();
+		$selected_count = 0;
+		$labels         = array();
+		foreach ( $options as $option ) {
+			if ( is_array( $option ) && ! empty( $option['placeholder'] ) ) {
+				continue;
+			}
+			if ( ! is_array( $option ) || ! is_string( $option['label'] ?? null ) || ! is_string( $option['value'] ?? null ) || '' === trim( $option['label'] ) || strlen( $option['label'] ) > 200 || strlen( $option['value'] ) > 200 || isset( $labels[ $option['label'] ] ) ) {
+				return '';
+			}
+			$labels[ $option['label'] ] = true;
+			$selected_count            += ! empty( $option['selected'] ) ? 1 : 0;
+			if ( $selected_count > 1 ) {
+				return '';
+			}
+			$values[] = array( $option['label'], $option['value'], ! empty( $option['selected'] ) );
+		}
+		if ( array() === $values ) {
+			return '';
+		}
+		$encoded = base64_encode( (string) wp_json_encode( $values ) ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode -- Encodes bounded choice data for a persisted CSS-class transport token, not obfuscation.
+		return strlen( $encoded ) <= 8192 ? 'ssi-choice-' . rtrim( strtr( $encoded, '+/', '-_' ), '=' ) : '';
+	}
+
+	/** Apply the captured native option values and selected state to Jetpack's select. */
+	public static function project_choice_values( string $html ): string {
+		if ( strlen( $html ) > 262144 || ! preg_match( '/\bssi-choice-([A-Za-z0-9_-]{1,8192})\b/', $html, $matches ) ) {
+			return $html;
+		}
+		$json = base64_decode( strtr( $matches[1], '-_', '+/' ), true ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode -- Decodes the persisted choice-data transport token before validating its shape.
+		$data = is_string( $json ) ? json_decode( $json, true ) : null;
+		if ( ! is_array( $data ) && str_ends_with( $matches[1], '-wrap' ) ) {
+			$json = base64_decode( strtr( substr( $matches[1], 0, -5 ), '-_', '+/' ), true ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode -- Decodes the same token after removing Jetpack's appended wrapper suffix.
+			$data = is_string( $json ) ? json_decode( $json, true ) : null;
+		}
+		if ( ! is_array( $data ) || count( $data ) > 32 || ! str_contains( $html, '<select' ) ) {
+			return $html;
+		}
+		$ordinal = 0;
+		$found   = false;
+		$updated = preg_replace_callback( '/<option\b([^>]*)>(.*?)<\/option>/si', static function ( array $matches ) use ( $data, &$ordinal, &$found ): string {
+			if ( ! isset( $data[ $ordinal ] ) || ! is_array( $data[ $ordinal ] ) || count( $data[ $ordinal ] ) !== 3 ) {
+				return $matches[0];
+			}
+			[ $label, $value, $selected ] = $data[ $ordinal ];
+			if ( ! is_string( $label ) || ! is_string( $value ) || ! is_bool( $selected ) || html_entity_decode( wp_strip_all_tags( $matches[2] ), ENT_QUOTES | ENT_HTML5, 'UTF-8' ) !== $label ) {
+				return $matches[0];
+			}
+			++$ordinal;
+			$found = true;
+			$attrs = preg_replace( '/\s+(?:value=(?:"[^"]*"|\x27[^\x27]*\x27)|selected(?:=(?:"[^"]*"|\x27[^\x27]*\x27))?)/i', '', $matches[1] );
+			return '<option' . $attrs . ' value="' . htmlspecialchars( $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ) . '"' . ( $selected ? ' selected="selected"' : '' ) . '>' . $matches[2] . '</option>';
+		}, $html );
+		return $found && count( $data ) === $ordinal && is_string( $updated ) ? $updated : $html;
 	}
 
 	/**
@@ -209,11 +271,16 @@ final class Static_Site_Importer_Provider_Form_Runtime_V1 {
 	}
 
 	/**
-	 * Keep a source sibling submit outside the gapped field list.
+	 * Keep source submits outside the gapped field list, in authored order.
 	 *
 	 * Jetpack renders fields and submit as children of one `.wp-block-jetpack-contact-form`.
 	 * A source list such as `grid gap-6` must wrap only the fields, or the submit loses
 	 * its authored top margin to the list gap (or to a cancel that overwrites it).
+	 * A source may also interleave rows — field(s), submit, field(s) — so every
+	 * contiguous run of field children is wrapped in place with the list classes and
+	 * submit children stay at their original position with their own presentation
+	 * classes. Gathering all fields into one list before the first submit would
+	 * silently move a later checkbox ahead of an earlier button.
 	 */
 	public static function project_field_list_wrapper( string $html, array $block = array() ): string {
 		$class_name = isset( $block['attrs']['className'] ) && is_string( $block['attrs']['className'] ) ? $block['attrs']['className'] : '';
@@ -260,26 +327,43 @@ final class Static_Site_Importer_Provider_Form_Runtime_V1 {
 		if ( empty( $list_classes ) ) {
 			return $html;
 		}
-		$submit_nodes = array();
-		$field_nodes  = array();
+		// Segment direct children in document order: submit children break the
+		// field runs and keep their original position; each contiguous field run
+		// is wrapped once, so no field ever crosses a source submit.
+		$field_runs = array();
+		$run        = array();
+		$has_submit = false;
+		$has_field  = false;
 		foreach ( iterator_to_array( $field_list->childNodes ) as $child ) {
 			if ( ! $child instanceof \DOMElement ) {
+				$run[] = $child;
 				continue;
 			}
 			if ( self::is_submit_field_list_child( $child ) ) {
-				$submit_nodes[] = $child;
-			} else {
-				$field_nodes[] = $child;
+				$has_submit = true;
+				if ( ! empty( $run ) ) {
+					$field_runs[] = $run;
+					$run          = array();
+				}
+				continue;
 			}
+			$has_field = true;
+			$run[]     = $child;
 		}
-		if ( empty( $submit_nodes ) || empty( $field_nodes ) ) {
+		if ( ! empty( $run ) ) {
+			$field_runs[] = $run;
+		}
+		if ( ! $has_submit || ! $has_field ) {
 			return $html;
 		}
-		$wrapper = $document->createElement( 'div' );
-		$wrapper->setAttribute( 'class', implode( ' ', array_values( array_unique( $list_classes ) ) ) );
-		$field_list->insertBefore( $wrapper, $submit_nodes[0] );
-		foreach ( $field_nodes as $node ) {
-			$wrapper->appendChild( $node );
+		$wrapper_classes = implode( ' ', array_values( array_unique( $list_classes ) ) );
+		foreach ( $field_runs as $run ) {
+			$wrapper = $document->createElement( 'div' );
+			$wrapper->setAttribute( 'class', $wrapper_classes );
+			$field_list->insertBefore( $wrapper, $run[0] );
+			foreach ( $run as $node ) {
+				$wrapper->appendChild( $node );
+			}
 		}
 		$field_list->setAttribute( 'class', implode( ' ', $kept ) );
 		$output = '';
@@ -429,26 +513,7 @@ final class Static_Site_Importer_Provider_Form_Runtime_V1 {
 		}
 		if ( ! empty( $source_classes ) ) {
 			$source_classes = array_values( array_unique( $source_classes ) );
-			// The provider sizes its submit wrapper to its own field height. The source
-			// sized that row from its own content, so the provider default is released
-			// on the wrapper exactly as it already is on the button it contains.
-			$projected = preg_replace_callback(
-				'/<div\b([^>]*\bclass=(["\'])[^"\']*\bwp-block-button\b[^"\']*\2[^>]*)>/is',
-				static function ( array $matches ): string {
-					$attributes = $matches[1];
-					if ( preg_match( '/\bstyle=(["\'])(.*?)\1/is', $attributes ) ) {
-						return '<div' . ( preg_replace( '/\bstyle=(["\'])(.*?)\1/is', 'style=$1$2;min-height:0$1', $attributes, 1 ) ?? $attributes ) . '>';
-					}
-
-					return '<div' . $attributes . ' style="min-height:0">';
-				},
-				$projected,
-				1
-			);
-			if ( ! is_string( $projected ) ) {
-				return $html;
-			}
-			$projected = preg_replace_callback(
+			$projected      = preg_replace_callback(
 			'/<button\b([^>]*)>/is',
 			static function ( array $matches ) use ( $source_classes ): string {
 				$attributes = $matches[1];
@@ -456,11 +521,6 @@ final class Static_Site_Importer_Provider_Form_Runtime_V1 {
 					$attributes = preg_replace( '/\bclass=(["\'])(.*?)\1/is', 'class=$1$2 ' . implode( ' ', $source_classes ) . '$1', $attributes, 1 ) ?? $attributes;
 				} else {
 					$attributes .= ' class="' . implode( ' ', $source_classes ) . '"';
-				}
-				if ( preg_match( '/\bstyle=(["\'])(.*?)\1/is', $attributes ) ) {
-					$attributes = preg_replace( '/\bstyle=(["\'])(.*?)\1/is', 'style=$1$2;min-height:0$1', $attributes, 1 ) ?? $attributes;
-				} else {
-					$attributes .= ' style="min-height:0"';
 				}
 				return '<button' . $attributes . '>';
 			},
