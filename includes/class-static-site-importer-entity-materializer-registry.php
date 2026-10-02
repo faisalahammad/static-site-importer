@@ -27,7 +27,6 @@ if ( ! class_exists( 'Static_Site_Importer_Diagnostic_Loss_Classes' ) ) {
  */
 class Static_Site_Importer_Entity_Materializer_Registry {
 
-	private const FORM_CONTROL_TOPOLOGY_MAX_DEPTH       = 16;
 	private const FAILURE_DIAGNOSTIC_MAX_ROWS           = 10;
 	private const FAILURE_DIAGNOSTIC_MAX_BYTES          = 256;
 	private const FAILURE_DIAGNOSTIC_SCAN_BUDGET        = 10;
@@ -1620,126 +1619,65 @@ class Static_Site_Importer_Entity_Materializer_Registry {
 			'errors' => $errors,
 		);
 	}
-
-	/** @return array{graph?:array<string,mixed>,error?:string} */
+	/**
+	 * Admit a producer form layout graph.
+	 *
+	 * Blocks Engine owns the graph contract and validates it with
+	 * FormLayoutGraphBuilder::assertValid(), including safe source identity.
+	 * The importer adds only its own materialization policy: a truncated graph
+	 * is incomplete evidence, presentation facts must be ones the provider can
+	 * express, and diagnostics are bounded.
+	 *
+	 * @return array{graph?:array<string,mixed>,error?:string}
+	 */
 	private static function normalize_computed_layout_graph( mixed $candidate ): array {
-		$schema         = is_array( $candidate ) ? ( $candidate['schema'] ?? null ) : null;
-		$version        = array(
-			'generic/computed-layout-graph/v1' => 1,
-			'generic/computed-layout-graph/v2' => 2,
-			'generic/computed-layout-graph/v3' => 3,
-		)[ is_string( $schema ) ? $schema : '' ] ?? 0;
-		$is_v2          = $version >= 2;
-		$expected_depth = $is_v2 ? 16 : 8;
-		if ( ! is_array( $candidate ) || 0 === $version || 'source_css_cascade' !== ( $candidate['basis'] ?? null ) || ! is_bool( $candidate['truncated'] ?? null ) || ! is_array( $candidate['limits'] ?? null ) || ! is_int( $candidate['limits']['nodes'] ?? null ) || ! is_int( $candidate['limits']['depth'] ?? null ) || ! is_int( $candidate['limits']['rules_per_node'] ?? null ) || $candidate['limits']['nodes'] < 1 || $candidate['limits']['nodes'] > 128 || $expected_depth !== $candidate['limits']['depth'] || $candidate['limits']['rules_per_node'] < 1 || $candidate['limits']['rules_per_node'] > 16 || ! is_array( $candidate['nodes'] ?? null ) || ! array_is_list( $candidate['nodes'] ) || count( $candidate['nodes'] ) > $candidate['limits']['nodes'] || ! is_array( $candidate['variants'] ?? null ) || ! is_array( $candidate['diagnostics'] ?? null ) ) {
-			return array( 'error' => 'layout_graph must use a bounded canonical computed-layout graph schema with its exact versioned depth.' );
+		if ( ! is_array( $candidate ) ) {
+			return array( 'error' => 'layout_graph must be a producer computed-layout graph.' );
 		}
-		if ( ! self::has_only_keys( $candidate, array( 'schema', 'basis', 'truncated', 'limits', 'nodes', 'variants', 'diagnostics' ) ) || ! self::has_only_keys( $candidate['limits'], array( 'nodes', 'depth', 'rules_per_node' ) ) ) {
-			return array( 'error' => 'layout_graph contains unknown canonical keys.' );
+		try {
+			\Automattic\BlocksEngine\PhpTransformer\HtmlToBlocks\Style\FormLayoutGraphBuilder::assertValid( $candidate );
+		} catch ( InvalidArgumentException $error ) {
+			return array( 'error' => 'layout_graph violates the producer contract: ' . $error->getMessage() );
 		}
 		if ( $candidate['truncated'] ) {
 			return array( 'error' => 'layout_graph is truncated.' );
 		}
-		$seen  = array();
 		$nodes = array();
 		foreach ( $candidate['nodes'] as $node ) {
-			if ( ! is_array( $node ) || ! self::has_only_keys( $node, $version >= 3 ? array( 'id', 'kind', 'parent', 'order', 'source', 'layout', 'provenance', 'sizing', 'presentation' ) : array( 'id', 'kind', 'parent', 'order', 'source', 'layout', 'provenance', 'sizing' ) ) || ! is_string( $node['id'] ?? null ) || ! preg_match( $version >= 3 ? '/^(?:form|wrapper-[0-9]+|control-[0-9]+|context-[0-9]+)$/D' : '/^(?:form|wrapper-[0-9]+|control-[0-9]+)$/D', $node['id'] ) || ( str_starts_with( $node['id'], 'context-' ) && 'container' !== ( $node['kind'] ?? null ) ) || isset( $seen[ $node['id'] ] ) || ! in_array( $node['kind'] ?? null, array( 'container', 'control' ), true ) || ! is_int( $node['order'] ?? null ) || $node['order'] < 0 || ! is_array( $node['source'] ?? null ) || ! is_array( $node['layout'] ?? null ) || ! is_array( $node['provenance'] ?? null ) ) {
-				return array( 'error' => 'layout_graph contains an unsupported canonical node.' );
-			}
-			$parent = $node['parent'] ?? null;
-			if ( null !== $parent && ( ! is_string( $parent ) || ! isset( $seen[ $parent ] ) ) ) {
-				return array( 'error' => 'computed_layout_graph parents must precede children.' );
-			}
-			$source = $node['source'];
-			// Producer class bounds are versioned: v1 carried 8, v2 16, and v3 64
-			// source class tokens beside an explicit element selector.
-			$class_limit = array(
-				1 => 8,
-				2 => 16,
-				3 => 64,
-			)[ $version ];
-			if ( ! self::has_only_keys( $source, $version >= 3 ? array( 'tag', 'selector', 'id', 'classes' ) : array( 'tag', 'id', 'classes' ) ) || ! is_string( $source['tag'] ?? null ) || ! preg_match( '/^[a-z][a-z0-9-]{0,30}$/D', $source['tag'] ) || ( isset( $source['id'] ) && ( ! is_string( $source['id'] ) || ! preg_match( '/^[A-Za-z_][A-Za-z0-9_-]{0,79}$/D', $source['id'] ) ) ) || ! is_array( $source['classes'] ?? null ) || ! array_is_list( $source['classes'] ) || count( $source['classes'] ) > $class_limit || array_filter( $source['classes'], static fn( $class_name ): bool => ! is_string( $class_name ) || ! preg_match( '/^[^\\s"\'<>\\x00-\\x1f]{1,128}$/D', $class_name ) ) || ( $version >= 3 && ( ! is_string( $source['selector'] ?? null ) || '' === trim( $source['selector'] ) || strlen( $source['selector'] ) > 2048 || preg_match( '/[\\x00-\\x1f{};]/', $source['selector'] ) ) ) ) {
-				return array( 'error' => 'layout_graph source identity is unsafe.' );
-			}
-			$layout      = $node['layout'];
-			$layout_keys = array_merge( array_keys( self::layout_property_map( $version ) ), array( 'item_placement' ) );
-			foreach ( $layout as $field => $value ) {
-				if ( ! in_array( $field, $layout_keys, true ) || ( ! is_scalar( $value ) && ! is_array( $value ) ) || ( 'width' === $field && ( ! is_string( $value ) || '' === trim( $value ) ) ) ) {
-					return array( 'error' => 'layout_graph layout facts must use only producer-supported keys.' );
-				}
-			}
-			$sizing = $node['sizing'] ?? null;
-			if ( null !== $sizing && ( ! $is_v2 || ! is_array( $sizing ) || ! self::has_only_keys( $sizing, array( 'kind', 'axis', 'container', 'grid_column' ) ) || 'control' !== $node['kind'] || 'grid_track' !== ( $sizing['kind'] ?? null ) || 'inline' !== ( $sizing['axis'] ?? null ) || ! is_string( $sizing['container'] ?? null ) || $node['parent'] !== $sizing['container'] || ! is_string( $sizing['grid_column'] ?? null ) || '' === trim( $sizing['grid_column'] ) || isset( $layout['width'] ) || ! isset( $seen[ $sizing['container'] ] ) ) ) {
-				return array( 'error' => 'layout_graph sizing evidence is malformed.' );
-			}
 			$clean = array(
 				'id'         => $node['id'],
 				'kind'       => $node['kind'],
-				'parent'     => $parent,
+				'parent'     => $node['parent'] ?? null,
 				'order'      => $node['order'],
-				'source'     => array_intersect_key( $source, array_flip( array( 'tag', 'selector', 'id', 'classes' ) ) ),
-				'layout'     => array_intersect_key( $layout, array_flip( $layout_keys ) ),
-				'provenance' => array_slice( $node['provenance'], 0, 16 ),
+				'source'     => $node['source'],
+				'layout'     => $node['layout'],
+				'provenance' => $node['provenance'],
 			);
 			if ( array_key_exists( 'presentation', $node ) ) {
 				// Resolved presentation belongs to a source container element, never to
 				// the provider-owned form root or a native control.
-				$presentation = 'container' === $node['kind'] && 'form' !== $node['id'] ? self::normalize_element_presentation( $node['presentation'] ) : array( 'error' => 'layout_graph presentation may only describe a source container element.' );
+				$presentation = 'form' !== $node['id'] ? self::normalize_element_presentation( $node['presentation'] ) : array( 'error' => 'layout_graph presentation may only describe a source container element.' );
 				if ( ! isset( $presentation['presentation'] ) ) {
 					return array( 'error' => $presentation['error'] ?? 'layout_graph presentation normalization did not produce presentation facts.' );
 				}
 				$clean['presentation'] = $presentation['presentation'];
 			}
-			if ( is_array( $sizing ) ) {
-				$clean['sizing'] = $sizing;
+			if ( is_array( $node['sizing'] ?? null ) ) {
+				$clean['sizing'] = $node['sizing'];
 			}
-			$seen[ $node['id'] ] = true;
-			$nodes[]             = $clean;
-		}
-		if ( count( $candidate['variants'] ) > 256 || ! array_is_list( $candidate['variants'] ) ) {
-			return array( 'error' => 'layout_graph variants exceed the producer contract bounds.' );
-		}
-		$variants = array();
-		foreach ( $candidate['variants'] as $variant ) {
-			if ( ! is_array( $variant ) || ! self::has_only_keys( $variant, array( 'node', 'condition', 'layout_patch', 'precedence', 'provenance' ) ) || ! is_string( $variant['node'] ?? null ) || ! isset( $seen[ $variant['node'] ] ) || ! self::valid_layout_condition( $variant['condition'] ?? null ) || ! is_array( $variant['layout_patch'] ?? null ) || array() === $variant['layout_patch'] || ! is_array( $variant['precedence'] ?? null ) || ! is_array( $variant['provenance'] ?? null ) || count( $variant['provenance'] ) > 16 ) {
-				return array( 'error' => 'layout_graph contains an unsupported canonical variant.' );
-			}
-			foreach ( $variant['layout_patch'] as $property => $value ) {
-				if ( ! isset( self::layout_property_map( $version )[ $property ] ) || ! is_string( $value ) || '' === trim( $value ) || ! isset( $variant['precedence'][ self::layout_property_map( $version )[ $property ] ] ) ) {
-					return array( 'error' => 'layout_graph variant layout facts are malformed.' );
-				}
-			}
-			foreach ( $variant['precedence'] as $property => $precedence ) {
-				if ( ! isset( self::layout_producer_property_map( $version )[ $property ] ) || ! isset( $variant['layout_patch'][ self::layout_producer_property_map( $version )[ $property ] ] ) || ! is_array( $precedence ) || ! self::has_only_keys( $precedence, array( 'source_order', 'specificity', 'important' ) ) || ! is_int( $precedence['source_order'] ?? null ) || ! is_int( $precedence['specificity'] ?? null ) || ! is_bool( $precedence['important'] ?? null ) ) {
-					return array( 'error' => 'layout_graph variant precedence is malformed.' );
-				}
-			}
-			foreach ( $variant['provenance'] as $fact ) {
-				if ( ! is_array( $fact ) || ! self::has_only_keys( $fact, array( 'source_path', 'source_sha256', 'selector', 'condition', 'properties' ) ) || ! self::is_safe_artifact_source_path( $fact['source_path'] ?? null ) || ! preg_match( '/^[a-f0-9]{64}$/D', $fact['source_sha256'] ?? '' ) || ! is_string( $fact['selector'] ?? null ) || '' === trim( $fact['selector'] ) || strlen( $fact['selector'] ) > 1024 || $fact['condition'] !== $variant['condition'] || ! is_array( $fact['properties'] ?? null ) || array() === $fact['properties'] || count( $fact['properties'] ) > count( self::layout_property_map( $version ) ) || array_filter( $fact['properties'], static fn( $property ): bool => ! is_string( $property ) || ! isset( self::layout_producer_property_map( $version )[ $property ] ) || ! isset( $variant['layout_patch'][ self::layout_producer_property_map( $version )[ $property ] ] ) ) ) {
-					return array( 'error' => 'layout_graph variant provenance is malformed.' );
-				}
-			}
-			$variants[] = $variant;
+			$nodes[] = $clean;
 		}
 		return array(
 			'graph' => array(
-				'schema'      => $schema,
+				'schema'      => $candidate['schema'],
 				'basis'       => $candidate['basis'],
 				'truncated'   => false,
-				'limits'      => array_intersect_key( $candidate['limits'], array_flip( array( 'nodes', 'depth', 'rules_per_node' ) ) ),
+				'limits'      => $candidate['limits'],
 				'nodes'       => $nodes,
-				'variants'    => $variants,
+				'variants'    => $candidate['variants'],
 				'diagnostics' => array_slice( $candidate['diagnostics'], 0, 32 ),
 			),
 		);
-	}
-
-	/** Accept canonical artifact-relative paths without narrowing source filenames. */
-	private static function is_safe_artifact_source_path( mixed $path ): bool {
-		if ( ! is_string( $path ) || '' === $path || str_contains( $path, "\0" ) || str_contains( $path, '\\' ) || ! preg_match( '//u', $path ) || str_starts_with( $path, '/' ) || 1 === preg_match( '#^[A-Za-z]:/#', $path ) ) {
-			return false;
-		}
-		return array() === array_filter( explode( '/', $path ), static fn( string $segment ): bool => '' === $segment || '.' === $segment || '..' === $segment );
 	}
 
 	/**
@@ -1764,7 +1702,7 @@ class Static_Site_Importer_Entity_Materializer_Registry {
 		if ( true === $candidate['truncated'] ) {
 			return array( 'error' => 'presentation_graph is truncated and cannot be materialized.' );
 		}
-		$properties = self::form_presentation_properties();
+		$properties = Static_Site_Importer_Provider_Layout_Overlay::presentation_property_map();
 		$roles      = array_merge(
 			...array_map(
 				static fn( array $row ): array => array_values( array_intersect_key( $row, array_flip( array( 'control', 'label', 'required_marker' ) ) ) ),
@@ -1784,267 +1722,85 @@ class Static_Site_Importer_Entity_Materializer_Registry {
 		return array( 'graph' => $candidate );
 	}
 
-	/** @param array<string,string> $properties @return array{role?:array<string,mixed>,error?:string} */
-	private static function normalize_form_presentation_role( mixed $candidate, array $properties, ?array $condition, bool $allow_empty = false ): array {
-		if ( ! is_array( $candidate ) || count( $candidate ) !== 2 || ! self::has_only_keys( $candidate, array( 'styles', 'provenance' ) ) || ! is_array( $candidate['styles'] ?? null ) || ( ! $allow_empty && empty( $candidate['styles'] ) ) || ! is_array( $candidate['provenance'] ?? null ) || count( $candidate['provenance'] ) > 32 ) {
-			return array( 'error' => 'presentation_graph role facts are malformed.' );
-		}
-		foreach ( $candidate['styles'] as $key => $value ) {
-			if ( ! isset( $properties[ $key ] ) || ! is_string( $value ) || '' === trim( $value ) || strlen( $value ) > 160 ) {
-				return array( 'error' => 'presentation_graph contains an unsupported style fact.' );
-			}
-		}
-		foreach ( $candidate['provenance'] as $fact ) {
-			if ( ! is_array( $fact ) || ! self::has_only_keys( $fact, array( 'source_path', 'source_sha256', 'selector', 'condition', 'properties' ) ) || ! self::is_safe_artifact_source_path( $fact['source_path'] ?? null ) || ! preg_match( '/^[a-f0-9]{64}$/D', $fact['source_sha256'] ?? '' ) || ! is_string( $fact['selector'] ?? null ) || '' === trim( $fact['selector'] ) || strlen( $fact['selector'] ) > 1024 || ( $fact['condition'] ?? null ) !== $condition || ! is_array( $fact['properties'] ?? null ) || empty( $fact['properties'] ) || array_filter( $fact['properties'], static fn( $property ): bool => ! is_string( $property ) || ! isset( $properties[ str_replace( '-', '_', $property ) ], $candidate['styles'][ str_replace( '-', '_', $property ) ] ) ) ) {
-				return array( 'error' => 'presentation_graph provenance is malformed.' );
-			}
-		}
-		return array(
-			'role' => array(
-				'styles'     => $candidate['styles'],
-				'provenance' => $candidate['provenance'],
-			),
-		);
-	}
-
-	/** @return array<string,string> */
-	private static function form_presentation_properties(): array {
-		return Static_Site_Importer_Provider_Layout_Overlay::presentation_property_map();
-	}
-
-	private static function valid_layout_condition( mixed $condition, int $depth = 0 ): bool {
-		if ( ! is_array( $condition ) || $depth > 8 ) {
-			return false;
-		}
-		if ( 'all' === ( $condition['kind'] ?? null ) ) {
-			return self::has_only_keys( $condition, array( 'kind', 'conditions' ) ) && is_array( $condition['conditions'] ?? null ) && ! empty( $condition['conditions'] ) && count( $condition['conditions'] ) <= 8 && array_reduce( $condition['conditions'], static fn( bool $valid, $item ): bool => $valid && self::valid_layout_condition( $item, $depth + 1 ), true );
-		}
-		return self::has_only_keys( $condition, array( 'kind', 'query' ) ) && in_array( $condition['kind'] ?? null, array( 'media', 'container', 'supports' ), true ) && is_string( $condition['query'] ?? null ) && '' !== trim( $condition['query'] ) && strlen( $condition['query'] ) <= 1024;
-	}
 
 	/**
-	 * Normalize the bounded generic form-control topology without applying any
-	 * provider semantics. A truncated or incomplete tree cannot preserve source
-	 * parentage, so it is reported instead of falling back to a flat form.
+	 * Admit a producer control topology.
+	 *
+	 * Blocks Engine owns the contract (FormControlTopologyBuilder::assertValid());
+	 * the importer refuses a truncated topology, which cannot preserve parentage.
 	 *
 	 * @return array{topology?:array<string,mixed>,error?:string}
 	 */
 	private static function normalize_form_control_topology( mixed $candidate, int $control_count ): array {
-		if ( ! is_array( $candidate ) || 'generic/form-control-topology/v1' !== ( $candidate['schema'] ?? null ) ) {
-			return array( 'error' => 'control_topology must use generic/form-control-topology/v1.' );
-		}
-		$max_depth = $candidate['max_depth'] ?? null;
-		$max_nodes = $candidate['max_nodes'] ?? null;
-		$nodes     = $candidate['nodes'] ?? null;
-		if ( ! is_int( $max_depth ) || $max_depth < 0 || $max_depth > self::FORM_CONTROL_TOPOLOGY_MAX_DEPTH || ! is_int( $max_nodes ) || $max_nodes < 1 || $max_nodes > 128 || ! is_array( $nodes ) || ! array_is_list( $nodes ) || count( $nodes ) > $max_nodes ) {
-			return array( 'error' => 'control_topology exceeds the supported generic bounds.' );
+		if ( ! is_array( $candidate ) ) {
+			return array( 'error' => 'control_topology must be a producer control topology.' );
 		}
 		if ( true === ( $candidate['truncated'] ?? false ) ) {
 			return array( 'error' => 'control_topology is truncated and cannot preserve source control parentage.' );
 		}
-		if ( ! isset( $candidate['truncated'] ) || ! is_bool( $candidate['truncated'] ) ) {
-			return array( 'error' => 'control_topology.truncated must be a boolean.' );
+		try {
+			\Automattic\BlocksEngine\PhpTransformer\HtmlToBlocks\Style\FormControlTopologyBuilder::assertValid( $candidate, $control_count );
+		} catch ( InvalidArgumentException $error ) {
+			return array( 'error' => 'control_topology violates the producer contract: ' . $error->getMessage() );
 		}
-		if ( ! self::has_only_keys( $candidate, array( 'schema', 'max_depth', 'max_nodes', 'nodes', 'truncated' ) ) ) {
-			return array( 'error' => 'control_topology contains unknown canonical keys.' );
+		foreach ( $candidate['nodes'] as $index => $node ) {
+			if ( isset( $node['legend'] ) ) {
+				$candidate['nodes'][ $index ]['legend'] = trim( preg_replace( '/\s+/', ' ', $node['legend'] ) ?? '' );
+			}
+			$candidate['nodes'][ $index ]['parent'] = $node['parent'] ?? null;
 		}
-
-		$normalized = array();
-		$seen_ids   = array();
-		$controls   = array();
-		$orders     = array();
-		foreach ( $nodes as $index => $node ) {
-			if ( ! is_array( $node ) || ! self::has_only_keys( $node, ( $node['kind'] ?? null ) === 'wrapper' ? array( 'id', 'kind', 'parent', 'order', 'depth', 'tag', 'source_id', 'class', 'fieldset_semantics', 'legend' ) : array( 'id', 'kind', 'parent', 'order', 'depth', 'control' ) ) || ! is_string( $node['id'] ?? null ) || ! preg_match( '/^(?:wrapper|control)-[A-Za-z0-9_-]{1,80}$/D', $node['id'] ) || isset( $seen_ids[ $node['id'] ] ) || ! in_array( $node['kind'] ?? null, array( 'wrapper', 'control' ), true ) || ! is_int( $node['order'] ?? null ) || $node['order'] < 0 || ! is_int( $node['depth'] ?? null ) || $node['depth'] < 0 || $node['depth'] > $max_depth ) {
-				return array( 'error' => 'control_topology contains an unsupported node.' );
-			}
-			$parent = $node['parent'] ?? null;
-			if ( null !== $parent && ( ! is_string( $parent ) || ! isset( $seen_ids[ $parent ] ) ) ) {
-				return array( 'error' => 'control_topology nodes must reference an earlier parent.' );
-			}
-			$parent_key = null === $parent ? '$root' : $parent;
-			if ( isset( $orders[ $parent_key ][ $node['order'] ] ) ) {
-				return array( 'error' => 'control_topology sibling order must be unique.' );
-			}
-			if ( null === $parent && 0 !== $node['depth'] ) {
-				return array( 'error' => 'control_topology root nodes must have depth zero.' );
-			}
-			if ( null !== $parent && ( 'wrapper' !== $seen_ids[ $parent ]['kind'] || $node['depth'] !== $seen_ids[ $parent ]['depth'] + 1 ) ) {
-				return array( 'error' => 'control_topology node depth and parent must describe a wrapper tree.' );
-			}
-
-			$normalized_node = array(
-				'id'     => $node['id'],
-				'kind'   => $node['kind'],
-				'parent' => $parent,
-				'order'  => $node['order'],
-				'depth'  => $node['depth'],
-			);
-			if ( 'control' === $node['kind'] ) {
-				if ( ! str_starts_with( $node['id'], 'control-' ) || ! is_int( $node['control'] ?? null ) || $node['control'] < 0 || $node['control'] >= $control_count || isset( $controls[ $node['control'] ] ) ) {
-					return array( 'error' => 'control_topology control references must be unique flat control indexes.' );
-				}
-				$controls[ $node['control'] ] = true;
-				$normalized_node['control']   = $node['control'];
-			} else {
-				if ( ! str_starts_with( $node['id'], 'wrapper-' ) ) {
-					return array( 'error' => 'control_topology wrapper ids must match their node kind.' );
-				}
-				foreach ( array( 'tag', 'source_id', 'class' ) as $field ) {
-					if ( ! isset( $node[ $field ] ) ) {
-						continue;
-					}
-					$value = $node[ $field ];
-					$valid = is_string( $value ) && ( 'tag' === $field ? in_array( $value, array( 'article', 'aside', 'dd', 'div', 'dl', 'dt', 'fieldset', 'footer', 'header', 'label', 'li', 'main', 'nav', 'ol', 'p', 'section', 'span', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'ul' ), true ) : (bool) preg_match( '/^[A-Za-z_][A-Za-z0-9_-]{0,79}(?: [A-Za-z_][A-Za-z0-9_-]{0,79}){0,7}$/D', $value ) );
-					if ( ! $valid ) {
-						return array( 'error' => 'control_topology presentation hooks must be bounded safe identifiers and supported Gutenberg group tags.' );
-					}
-					$normalized_node[ $field ] = $value;
-				}
-				if ( isset( $node['fieldset_semantics'] ) ) {
-					if ( 'fieldset' !== ( $node['tag'] ?? '' ) || ! in_array( $node['fieldset_semantics'], array( 'plain_group', 'labelled_group', 'disabled_group', 'attributed_group' ), true ) ) {
-						return array( 'error' => 'control_topology fieldset semantics must describe a fieldset wrapper.' );
-					}
-					$normalized_node['fieldset_semantics'] = $node['fieldset_semantics'];
-				}
-				if ( isset( $node['legend'] ) ) {
-					if ( 'labelled_group' !== ( $node['fieldset_semantics'] ?? '' ) || ! is_string( $node['legend'] ) || '' === trim( $node['legend'] ) || 200 < strlen( $node['legend'] ) ) {
-						return array( 'error' => 'control_topology fieldset legends must be bounded labelled-group text.' );
-					}
-					$normalized_node['legend'] = trim( preg_replace( '/\s+/', ' ', $node['legend'] ) ?? '' );
-				}
-			}
-			$seen_ids[ $node['id'] ]                 = $normalized_node;
-			$orders[ $parent_key ][ $node['order'] ] = true;
-			$normalized[]                            = $normalized_node;
-		}
-		if ( count( $controls ) !== $control_count ) {
-			return array( 'error' => 'control_topology must preserve every flat control exactly once.' );
-		}
-
-		return array(
-			'topology' => array(
-				'schema'    => 'generic/form-control-topology/v1',
-				'max_depth' => $max_depth,
-				'max_nodes' => $max_nodes,
-				'nodes'     => $normalized,
-				'truncated' => false,
-			),
-		);
+		return array( 'topology' => $candidate );
 	}
 
-	/** @return array{relations?:array<string,mixed>,error?:string} */
+	/**
+	 * Admit producer sibling relations (FormControlTopologyBuilder::assertSiblingRelations());
+	 * the importer refuses truncated relations, which cannot preserve adjacency.
+	 *
+	 * @return array{relations?:array<string,mixed>,error?:string}
+	 */
 	private static function normalize_form_sibling_relations( mixed $candidate, int $control_count ): array {
-		if ( ! is_array( $candidate ) || 'generic/form-sibling-relations/v1' !== ( $candidate['schema'] ?? null ) || ! self::has_only_keys( $candidate, array( 'schema', 'max_pairs', 'truncated', 'pairs' ) ) || ! is_int( $candidate['max_pairs'] ?? null ) || $candidate['max_pairs'] < 1 || $candidate['max_pairs'] > 128 || ! is_bool( $candidate['truncated'] ?? null ) || ! is_array( $candidate['pairs'] ?? null ) || ! array_is_list( $candidate['pairs'] ) || count( $candidate['pairs'] ) > $candidate['max_pairs'] ) {
-			return array( 'error' => 'sibling_relations must use bounded generic/form-sibling-relations/v1.' );
+		if ( ! is_array( $candidate ) ) {
+			return array( 'error' => 'sibling_relations must be producer sibling relations.' );
+		}
+		try {
+			\Automattic\BlocksEngine\PhpTransformer\HtmlToBlocks\Style\FormControlTopologyBuilder::assertSiblingRelations( $candidate, $control_count );
+		} catch ( InvalidArgumentException $error ) {
+			return array( 'error' => 'sibling_relations violates the producer contract: ' . $error->getMessage() );
 		}
 		if ( $candidate['truncated'] ) {
 			return array( 'error' => 'sibling_relations is truncated and cannot preserve direct source adjacency.' );
 		}
-		$seen = array();
-		foreach ( $candidate['pairs'] as $pair ) {
-			if ( ! is_array( $pair ) || ! self::has_only_keys( $pair, array( 'control' ) ) || ! is_int( $pair['control'] ?? null ) || $pair['control'] < 0 || $pair['control'] >= $control_count || isset( $seen[ $pair['control'] ] ) ) {
-				return array( 'error' => 'sibling_relations pairs must reference unique flat controls.' );
-			}
-			$seen[ $pair['control'] ] = true;
-		}
-		return array(
-			'relations' => array(
-				'schema'    => 'generic/form-sibling-relations/v1',
-				'max_pairs' => $candidate['max_pairs'],
-				'truncated' => false,
-				'pairs'     => $candidate['pairs'],
-			),
-		);
+		return array( 'relations' => $candidate );
 	}
 
 	/**
-	 * Layout facts each computed-layout graph version may carry: v2 adds sizing
-	 * and flow margins, v3 adds the declaring element's box (min-height, padding).
+	 * Admit the resolved source presentation a v3 graph attaches to a container.
 	 *
-	 * @return array<string,string>
-	 */
-	private static function layout_property_map( int $version = 1 ): array {
-		$map = Static_Site_Importer_Provider_Layout_Overlay::layout_property_map();
-		if ( $version < 3 ) {
-			$map = array_diff_key( $map, Static_Site_Importer_Provider_Layout_Overlay::box_property_map() );
-		}
-		if ( $version < 2 ) {
-			unset( $map['width'], $map['height'], $map['margin_block_start'], $map['margin_block_end'], $map['margin_inline_start'], $map['margin_inline_end'] );
-		}
-		return $map;
-	}
-
-	/** @return array<string,string> */
-	private static function layout_producer_property_map( int $version = 1 ): array {
-		return array_flip( self::layout_property_map( $version ) );
-	}
-
-	/**
-	 * Validate the resolved source presentation a v3 graph attaches to a
-	 * container node. Base facts and every conditional patch keep provenance.
+	 * Blocks Engine owns the envelope contract through
+	 * FormPresentationGraphBuilder::assertElement(); the importer refuses a
+	 * truncated presentation and any style the provider overlay cannot express.
 	 *
 	 * @return array{presentation?:array<string,mixed>,error?:string}
 	 */
 	private static function normalize_element_presentation( mixed $candidate ): array {
-		if ( ! is_array( $candidate ) || 'generic/form-element-presentation/v1' !== ( $candidate['schema'] ?? null ) || ! self::has_only_keys( $candidate, array( 'schema', 'styles', 'provenance', 'variants', 'truncated', 'diagnostics' ) ) || false !== ( $candidate['truncated'] ?? null ) || ! is_array( $candidate['variants'] ?? null ) || ! array_is_list( $candidate['variants'] ) || count( $candidate['variants'] ) > 96 || ! is_array( $candidate['diagnostics'] ?? null ) || count( $candidate['diagnostics'] ) > 32 ) {
-			return array( 'error' => 'layout_graph element presentation must be a complete bounded generic/form-element-presentation/v1 envelope.' );
+		if ( ! is_array( $candidate ) ) {
+			return array( 'error' => 'layout_graph element presentation must be a producer element presentation.' );
 		}
-		$properties = self::form_presentation_properties();
-		$base       = self::normalize_form_presentation_role(
-			array(
-				'styles'     => $candidate['styles'] ?? null,
-				'provenance' => $candidate['provenance'] ?? null,
-			),
-			$properties,
-			null,
-			true
-		);
-		if ( isset( $base['error'] ) ) {
-			return array( 'error' => 'layout_graph element presentation base facts are malformed.' );
+		try {
+			\Automattic\BlocksEngine\PhpTransformer\HtmlToBlocks\Style\FormPresentationGraphBuilder::assertElement( $candidate );
+		} catch ( InvalidArgumentException $error ) {
+			return array( 'error' => 'layout_graph element presentation violates the producer contract: ' . $error->getMessage() );
 		}
-		$variants = array();
-		foreach ( $candidate['variants'] as $variant ) {
-			if ( ! is_array( $variant ) || ! self::has_only_keys( $variant, array( 'condition', 'styles', 'precedence', 'provenance' ) ) || ! self::valid_layout_condition( $variant['condition'] ?? null ) || ! is_array( $variant['precedence'] ?? null ) ) {
-				return array( 'error' => 'layout_graph element presentation variant is malformed.' );
-			}
-			$role = self::normalize_form_presentation_role(
-				array(
-					'styles'     => $variant['styles'] ?? null,
-					'provenance' => $variant['provenance'] ?? null,
-				),
-				$properties,
-				$variant['condition']
-			);
-			if ( isset( $role['error'] ) ) {
-				return array( 'error' => 'layout_graph element presentation variant facts are malformed.' );
-			}
-			foreach ( $variant['precedence'] as $property => $precedence ) {
-				if ( ! is_string( $property ) || ! isset( $role['role']['styles'][ str_replace( '-', '_', $property ) ] ) || ! is_array( $precedence ) || ! self::has_only_keys( $precedence, array( 'source_order', 'specificity', 'important' ) ) || ! is_int( $precedence['source_order'] ?? null ) || ! is_int( $precedence['specificity'] ?? null ) || ! is_bool( $precedence['important'] ?? null ) ) {
-					return array( 'error' => 'layout_graph element presentation precedence is malformed.' );
-				}
-			}
-			$variants[] = array(
-				'condition'  => $variant['condition'],
-				'styles'     => $role['role']['styles'],
-				'precedence' => $variant['precedence'],
-				'provenance' => $role['role']['provenance'],
-			);
+		if ( false !== $candidate['truncated'] ) {
+			return array( 'error' => 'layout_graph element presentation is truncated.' );
 		}
-		return array(
-			'presentation' => array(
-				'schema'      => 'generic/form-element-presentation/v1',
-				'styles'      => $base['role']['styles'],
-				'provenance'  => $base['role']['provenance'],
-				'variants'    => $variants,
-				'truncated'   => false,
-				'diagnostics' => array_values( array_filter( $candidate['diagnostics'], static fn( $diagnostic ): bool => is_string( $diagnostic ) && '' !== trim( $diagnostic ) && strlen( $diagnostic ) <= 1100 ) ),
-			),
-		);
-	}
-
-	/** @param array<int,string> $allowed */
-	private static function has_only_keys( array $candidate, array $allowed ): bool {
-		return array() === array_diff( array_keys( $candidate ), $allowed );
+		$properties = Static_Site_Importer_Provider_Layout_Overlay::presentation_property_map();
+		foreach ( array_merge( array( $candidate['styles'] ), array_column( $candidate['variants'], 'styles' ) ) as $styles ) {
+			if ( array_diff_key( $styles, $properties ) ) {
+				return array( 'error' => 'layout_graph element presentation contains a style the provider cannot materialize.' );
+			}
+		}
+		return array( 'presentation' => $candidate );
 	}
 
 	/** @return array<string,mixed>|null */
