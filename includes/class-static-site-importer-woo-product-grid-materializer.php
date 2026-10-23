@@ -38,6 +38,7 @@ final class Static_Site_Importer_Woo_Product_Grid_Materializer {
 			'id'                       => 'woocommerce_product_grid',
 			'entity_type'              => 'product_grid',
 			'entity_collection'        => 'product_grids',
+			'rejected_rows_degrade'    => true,
 			'capability'               => 'shop',
 			'provider'                 => 'woocommerce',
 			'label'                    => 'WooCommerce product grid',
@@ -161,7 +162,7 @@ final class Static_Site_Importer_Woo_Product_Grid_Materializer {
 	 *
 	 * @return array<int,array<string,mixed>> Product id => that item's slot values.
 	 */
-	private static function product_ids( array $entity ): array {
+	public static function product_ids( array $entity ): array {
 		$ids = array();
 		foreach ( is_array( $entity['items'] ?? null ) ? $entity['items'] : array() as $item ) {
 			$slug = is_array( $item ) ? sanitize_title( (string) ( $item['product'] ?? '' ) ) : '';

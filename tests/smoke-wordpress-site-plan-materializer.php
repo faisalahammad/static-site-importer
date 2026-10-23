@@ -76,7 +76,12 @@ class WP_Post {
 		$this->post_content = stripslashes( (string) ( $GLOBALS['ssi_plan_posts'][ $id ]['post_content'] ?? '' ) ); }
 }
 function apply_filters( string $hook, $value, ...$args ) {
-	unset( $hook, $args );
+	// This filesystem/post-store fixture has no native Redirection database.
+	// Provider reconciliation is exercised by redirection-wordpress acceptance.
+	if ( 'static_site_importer_entity_materializers' === $hook ) {
+		unset( $value['redirection_routes'] );
+	}
+	unset( $args );
 	return $value; }
 function get_page_uri( WP_Post|int $post ): string {
 	$id = $post instanceof WP_Post ? $post->ID : $post;
@@ -1579,7 +1584,7 @@ $json_compatibility_payload = array(
 $json_compatibility_path    = $GLOBALS['ssi_plan_root'] . '/json-compatibility.json';
 $json_compatibility_receipt = array();
 $write_projection->invokeArgs( null, array( $json_compatibility_path, $json_compatibility_payload, &$json_compatibility_receipt ) );
-$assert( (string) wp_json_encode( $json_compatibility_payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) . "\n" === file_get_contents( $json_compatibility_path ), 'streamed public JSON matches historical WordPress encoding for Unicode, quotes, slashes, and control characters' );
+$assert( (string) wp_json_encode( $json_compatibility_payload, JSON_UNESCAPED_SLASHES ) . "\n" === file_get_contents( $json_compatibility_path ), 'streamed public JSON stays compact for Unicode, quotes, slashes, and control characters' );
 $failed_projection_path = $GLOBALS['ssi_plan_root'] . '/failed-projection-destination';
 mkdir( $failed_projection_path, 0777, true );
 $failed_projection_receipt = array( 'transaction' => (object) array( 'state' => array( 'rollback' => array( 'files' => array() ) ) ) );
@@ -3687,7 +3692,7 @@ $route_content     = is_array( $route_home ) ? stripslashes( (string) ( $route_h
 $route_rendered    = Static_Site_Importer_Internal_Link_Runtime::resolve_urls( $route_content );
 $contact_source_id = (int) ( $route_receipt['completed']['pages']['website/contact/index.html'] ?? 0 );
 $assert( 'completed' === ( $route_receipt['status'] ?? '' ) && str_contains( $route_rendered, 'href="https://example.test/contact/"' ) && str_contains( $route_rendered, 'href="https://example.test/2024/03/news/"' ), 'canonical routes resolve to actual WordPress page and dated-post permalinks after materialization' );
-$assert( 'contact/index.html' === get_post_meta( $contact_source_id, Static_Site_Importer_Source_Route_Redirect::META_KEY, true ), 'source file routes are persisted as queryable post meta for 404 redirects' );
+$assert( 'contact/index.html' === get_post_meta( $contact_source_id, Static_Site_Importer_Source_Route::META_KEY, true ), 'source file routes are persisted as plain metadata for export and manifests' );
 $rewrite_route_references = new ReflectionMethod( Static_Site_Importer_Site_Plan_Persistence::class, 'rewrite_route_references' );
 $pin_route_content        = $rewrite_route_references->invoke( null, 'data-pin-url=\\u0022/post/news\\u0022', array( '/post/news' => 'https://example.test/2024/03/news/' ) );
 $assert( 'data-pin-url=\\u0022https://example.test/2024/03/news/\\u0022' === $pin_route_content, 'escaped route-bearing data URL attributes resolve to the materialized WordPress permalink' );

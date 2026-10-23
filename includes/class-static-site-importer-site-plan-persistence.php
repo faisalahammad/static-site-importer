@@ -13,6 +13,9 @@ if ( ! class_exists( 'Static_Site_Importer_Public_Error_Projection' ) ) {
 	require_once __DIR__ . '/class-static-site-importer-public-error-projection.php';
 }
 
+if ( ! class_exists( 'Static_Site_Importer_Planned_Page_Templates' ) ) {
+	require_once __DIR__ . '/class-static-site-importer-planned-page-templates.php';
+}
 if ( ! class_exists( 'Static_Site_Importer_Build_Provenance' ) ) {
 	require_once __DIR__ . '/class-static-site-importer-build-provenance.php';
 }
@@ -25,8 +28,8 @@ if ( ! class_exists( 'Static_Site_Importer_Capture_Evidence' ) ) {
 if ( ! class_exists( 'Static_Site_Importer_Internal_Link_Runtime' ) ) {
 	require_once __DIR__ . '/class-static-site-importer-internal-link-runtime.php';
 }
-if ( ! class_exists( 'Static_Site_Importer_Source_Route_Redirect' ) ) {
-	require_once __DIR__ . '/class-static-site-importer-source-route-redirect.php';
+if ( ! class_exists( 'Static_Site_Importer_Source_Route' ) ) {
+	require_once __DIR__ . '/class-static-site-importer-source-route.php';
 }
 if ( ! class_exists( 'Static_Site_Importer_Redirects_Manifest' ) ) {
 	require_once __DIR__ . '/class-static-site-importer-redirects-manifest.php';
@@ -42,6 +45,14 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 
 	/** @param array<string,mixed> $prepared @return array<string,mixed> */
 	public static function materialize_prepared( array $prepared ): array {
+		return Static_Site_Importer_Planned_Page_Templates::during(
+			$prepared['plan'] ?? null,
+			static fn(): array => self::materialize_prepared_state( $prepared )
+		);
+	}
+
+	/** @param array<string,mixed> $prepared @return array<string,mixed> */
+	private static function materialize_prepared_state( array $prepared ): array {
 		if ( 'prepared' !== ( $prepared['status'] ?? '' ) || ! isset( $prepared['plan'] ) || ! is_array( $prepared['plan'] ) || ! Static_Site_Importer_Site_Plan_Receipt::valid_receipt_instance_id( $prepared['receipt_instance_id'] ?? null ) ) {
 			return Static_Site_Importer_Site_Plan_Receipt::receipt(
 				'rejected',
@@ -240,15 +251,15 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 			if ( ! self::write_post_meta( $post, '_static_site_importer_provenance', (string) wp_json_encode( $provenance ) ) ) {
 				return self::failed_receipt( $state, 'materialization_provenance_metadata_write_failed' );
 			}
-			$source_route = Static_Site_Importer_Source_Route_Redirect::public_source_route( (string) $page['source_path'] );
-			if ( '' !== $source_route && ! self::write_post_meta( $post, Static_Site_Importer_Source_Route_Redirect::META_KEY, $source_route ) ) {
+			$source_route = Static_Site_Importer_Source_Route::public_source_route( (string) $page['source_path'] );
+			if ( '' !== $source_route && ! self::write_post_meta( $post, Static_Site_Importer_Source_Route::META_KEY, $source_route ) ) {
 				return self::failed_receipt( $state, 'materialization_source_route_metadata_write_failed' );
 			}
 			foreach ( $state['source_route_aliases'][ $page['source_path'] ] ?? array() as $alias_route ) {
 				if ( ! is_string( $alias_route ) || '' === $alias_route || $alias_route === $source_route ) {
 					continue;
 				}
-				if ( ! self::add_post_meta_value( $post, Static_Site_Importer_Source_Route_Redirect::META_KEY, $alias_route ) ) {
+				if ( ! self::add_post_meta_value( $post, Static_Site_Importer_Source_Route::META_KEY, $alias_route ) ) {
 					return self::failed_receipt( $state, 'materialization_source_route_metadata_write_failed' );
 				}
 			}
@@ -661,9 +672,9 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 					'source_path'         => $source,
 				)
 			);
-			$route_key = Static_Site_Importer_Source_Route_Redirect::META_KEY;
+			$route_key = Static_Site_Importer_Source_Route::META_KEY;
 			delete_post_meta( $destination, $route_key );
-			$aliases = array_merge( array( ltrim( $claim['route'], '/' ), Static_Site_Importer_Source_Route_Redirect::public_source_route( $source ) ), $state['source_route_aliases'][ $source ] ?? array() );
+			$aliases = array_merge( array( ltrim( $claim['route'], '/' ), Static_Site_Importer_Source_Route::public_source_route( $source ) ), $state['source_route_aliases'][ $source ] ?? array() );
 			foreach ( array_unique( $aliases ) as $alias ) {
 				if ( '' !== $alias && ! self::add_post_meta_value( $destination, $route_key, $alias ) ) {
 					return new WP_Error( 'whole_page_destination_route_metadata_failed' );
@@ -761,11 +772,16 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 			$post['meta_input'] = wp_slash( $fields );
 		}
 		if ( ! empty( $page['metadata']['detected_date'] ) ) {
-			// The classifier emits UTC. post_date_gmt stores that absolute value;
-			// wp_insert_post derives the site-local post_date from it using the
-			// configured timezone, so writing it here would double-shift display
-			// on non-UTC sites. Only dated documents set the date at all.
+			// The classifier emits UTC; post_date_gmt stores that absolute value.
+			// When the source stated the same instant with its own offset, that
+			// wall-clock time is the post_date its permalinks use. Otherwise
+			// wp_insert_post derives post_date from the configured timezone.
+			// Only dated documents set the date at all.
 			$post['post_date_gmt'] = (string) $page['metadata']['detected_date'];
+			$local_date            = Static_Site_Importer_Document_Type_Classifier::local_date( $page, $post['post_date_gmt'] );
+			if ( null !== $local_date ) {
+				$post['post_date'] = $local_date;
+			}
 		}
 		$id = wp_insert_post( $post, true );
 		if ( is_wp_error( $id ) ) {
@@ -1904,7 +1920,7 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 				'reconciliation_identity'                 => get_post_meta( $id, self::RECONCILIATION_META_KEY, true ),
 				'producer_reconciliation_identity'        => get_post_meta( $id, self::PRODUCER_RECONCILIATION_META_KEY, true ),
 				'producer_reconciliation_identity_exists' => metadata_exists( 'post', $id, self::PRODUCER_RECONCILIATION_META_KEY ),
-				'source_routes'                           => get_post_meta( $id, Static_Site_Importer_Source_Route_Redirect::META_KEY, false ),
+				'source_routes'                           => get_post_meta( $id, Static_Site_Importer_Source_Route::META_KEY, false ),
 				'thumbnail'                               => get_post_meta( $id, '_thumbnail_id', false ),
 				'taxonomy_memberships'                    => get_post_meta( $id, '_static_site_importer_taxonomy_memberships', true ),
 				'taxonomy_memberships_exists'             => metadata_exists( 'post', $id, '_static_site_importer_taxonomy_memberships' ),
@@ -2174,7 +2190,7 @@ final class Static_Site_Importer_Site_Plan_Persistence {
 						}
 					}
 					foreach ( array(
-						'source_routes' => Static_Site_Importer_Source_Route_Redirect::META_KEY,
+						'source_routes' => Static_Site_Importer_Source_Route::META_KEY,
 						'thumbnail'     => '_thumbnail_id',
 					) as $snapshot => $meta_key ) {
 						if ( ! array_key_exists( $snapshot, $before ) ) {

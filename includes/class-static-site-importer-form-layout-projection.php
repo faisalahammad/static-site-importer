@@ -458,11 +458,7 @@ final class Static_Site_Importer_Form_Layout_Projection {
 			return null;
 		}
 		foreach ( array_keys( $s->auxiliary_popup_controls ) as $control_index ) {
-			$s->operations[] = array(
-				'dimension'   => 'topology',
-				'strategy'    => 'provider_auxiliary_popup_control',
-				'target_hash' => hash( 'sha256', 'control-' . $control_index ),
-			);
+			$s->record( 'topology', 'provider_auxiliary_popup_control', 'control-' . $control_index );
 		}
 		foreach ( $s->form['layout_graph']['nodes'] ?? array() as $layout_node ) {
 			if ( is_array( $layout_node ) && is_string( $layout_node['id'] ?? null ) ) {
@@ -475,8 +471,21 @@ final class Static_Site_Importer_Form_Layout_Projection {
 				$s->variants_by_node[ $variant['node'] ][] = $variant;
 			}
 		}
+		$hidden_nodes = self::unconditionally_hidden_descendants( $s->form );
+		foreach ( array_keys( $hidden_nodes ) as $node_id ) {
+			$s->represented_layout_nodes[]   = $node_id;
+			$s->represented_topology_nodes[] = $node_id;
+			$s->record( 'topology', 'provider_omitted_hidden_subtree', $node_id );
+		}
+		foreach ( $s->children as $parent => $children ) {
+			$s->children[ $parent ] = array_values( array_filter( $children, static fn( array $node ): bool => ! isset( $hidden_nodes[ $node['id'] ] ) ) );
+		}
+		$s->nodes          = array_values( array_filter( $s->nodes, static fn( array $node ): bool => ! isset( $hidden_nodes[ $node['id'] ] ) ) );
 		$exact_native_tree = Static_Site_Importer_Form_Native_Topology::exact_native_topology( $s->nodes, $s->children, $s->field_blocks, $s->suppressed_controls, $s->layout_nodes_by_id, $s->layout_by_node, $s->variants_by_node, self::layout_scope( $s->form ) );
 		if ( null !== $exact_native_tree ) {
+			$exact_native_tree['operations']                 = array_merge( $s->operations, $exact_native_tree['operations'] );
+			$exact_native_tree['represented_layout_nodes']   = array_merge( array_keys( $hidden_nodes ), $exact_native_tree['represented_layout_nodes'] );
+			$exact_native_tree['represented_topology_nodes'] = array_merge( array_keys( $hidden_nodes ), $exact_native_tree['represented_topology_nodes'] );
 			return $exact_native_tree;
 		}
 		$s->collect_controls = static function ( array $node, bool $include_auxiliary = true ) use ( $s ): array {
@@ -704,11 +713,7 @@ final class Static_Site_Importer_Form_Layout_Projection {
 
 				$s->field_blocks[ $control_index ]['attrs']['className'] = trim( (string) preg_replace( '/\s+/', ' ', implode( ' ', array_filter( $class_names ) ) ) );
 
-				$s->operations[] = array(
-					'dimension'   => 'topology',
-					'strategy'    => 'provider_field_wrapper_class_projection',
-					'target_hash' => hash( 'sha256', $outermost['id'] ),
-				);
+				$s->record( 'topology', 'provider_field_wrapper_class_projection', $outermost['id'] );
 
 				$row = self::submit_block_row( $chain, $s->layout_nodes_by_id );
 				if ( null !== $row ) {
@@ -718,11 +723,7 @@ final class Static_Site_Importer_Form_Layout_Projection {
 						'layout' => $row,
 					);
 
-					$s->operations[] = array(
-						'dimension'   => 'layout',
-						'strategy'    => 'provider_submit_block_row',
-						'target_hash' => hash( 'sha256', $outermost['id'] ),
-					);
+					$s->record( 'layout', 'provider_submit_block_row', $outermost['id'] );
 				}
 				continue;
 			}
@@ -767,32 +768,12 @@ final class Static_Site_Importer_Form_Layout_Projection {
 				$wrapper_role                    = $is_primary_wrapper ? '' : $node['destination_role'] . '-';
 				$class_names[]                   = implode( ' ', array_map( static fn ( string $class_name ): string => 'ssi-source-wrapper-' . $wrapper_role . $layer . '--' . $class_name, $wrapper_classes ) );
 				$s->wrapper_hooks[ $node['id'] ] = 0 === $offset && $is_primary_wrapper ? $generated_class . '-wrap' : $generated_class;
-				$s->operations[]                 = array(
-					'dimension'   => 'topology',
-					'strategy'    => 'provider_field_wrapper_class_projection',
-					'target_hash' => hash( 'sha256', $node['id'] ),
-				);
+				$s->record( 'topology', 'provider_field_wrapper_class_projection', $node['id'] );
 				// A source box whose own stylesheet addresses it by class keeps its layout
 				// through the projected classes, so it needs no generated overlay target.
 				$class_tokens = self::class_tokens( $node );
 				$provenance   = $s->layout_nodes_by_id[ $node['id'] ]['provenance'] ?? array();
-				$class_owned  = ! empty( $s->layout_by_node[ $node['id'] ] ?? array() ) && ! empty( $provenance );
-				foreach ( $provenance as $provenance_row ) {
-					$selector      = is_array( $provenance_row ) && is_string( $provenance_row['selector'] ?? null ) ? $provenance_row['selector'] : '';
-					$matches_class = false;
-					if ( self::is_class_only_selector( $selector ) ) {
-						foreach ( $class_tokens as $class_token ) {
-							if ( preg_match( '/\.' . preg_quote( $class_token, '/' ) . '(?![a-zA-Z0-9_-])/', $selector ) ) {
-								$matches_class = true;
-								break;
-							}
-						}
-					}
-					if ( ! $matches_class ) {
-						$class_owned = false;
-						break;
-					}
-				}
+				$class_owned  = ! empty( $s->layout_by_node[ $node['id'] ] ?? array() ) && self::class_owns_rows( $provenance, $class_tokens );
 				if ( $class_owned ) {
 					$s->represented_layout_nodes[] = $node['id'];
 				} elseif ( 0 === $offset && $is_primary_wrapper && array() !== $class_tokens ) {
@@ -800,28 +781,7 @@ final class Static_Site_Importer_Form_Layout_Projection {
 					// primary box as its own element carrying its source classes, so a
 					// source rule whose subject is those classes already paints it there;
 					// repeating the box on the provider shell would double it.
-					$class_carried = self::class_carried_box_facts( $s->layout_by_node[ $node['id'] ] ?? array(), $provenance, $class_tokens );
-					foreach ( $s->variants_by_node[ $node['id'] ] ?? array() as $variant ) {
-						$patch = self::layout_patch( $variant );
-						foreach ( array_keys( array_intersect_key( $patch, Static_Site_Importer_Provider_Layout_Overlay::box_property_map() ) ) as $fact ) {
-							// A conditional box patch is carried only when its own rule is too.
-							$rows = array_map( static fn( $row ): mixed => is_array( $row ) ? array_merge( $row, array( 'condition' => null ) ) : $row, is_array( $variant['provenance'] ?? null ) ? $variant['provenance'] : array() );
-							if ( array( $fact ) === self::class_carried_box_facts( array( $fact => $patch[ $fact ] ), $rows, $class_tokens ) ) {
-								$s->class_carried_variants[ $node['id'] ][] = $fact;
-							} else {
-								$class_carried = array_values( array_diff( $class_carried, array( $fact ) ) );
-							}
-						}
-					}
-					if ( array() !== $class_carried ) {
-						$s->suppressed_layout_properties[ $node['id'] ] = array_values( array_unique( array_merge( $s->suppressed_layout_properties[ $node['id'] ] ?? array(), $class_carried ) ) );
-						$s->layout_by_node[ $node['id'] ]               = array_diff_key( $s->layout_by_node[ $node['id'] ] ?? array(), array_flip( $class_carried ) );
-						$s->operations[]                                = array(
-							'dimension'   => 'layout',
-							'strategy'    => 'provider_source_box_class_carry',
-							'target_hash' => hash( 'sha256', $node['id'] ),
-						);
-					}
+					self::carry_class_owned_facts( $s, $node['id'], $provenance, $class_tokens, Static_Site_Importer_Provider_Layout_Overlay::box_property_map(), 'provider_source_box_class_carry' );
 				}
 			}
 			$s->field_blocks[ $control_index ]['attrs']['className'] = trim( (string) preg_replace( '/\s+/', ' ', implode( ' ', array_filter( $class_names ) ) ) );
@@ -852,13 +812,27 @@ final class Static_Site_Importer_Form_Layout_Projection {
 			return;
 		}
 		$properties = array_intersect_key( Static_Site_Importer_Provider_Layout_Overlay::layout_property_map(), array_flip( self::MARGIN_SIDE_FACTS ) );
-		$carried    = self::class_carried_box_facts( $s->layout_by_node[ $control_id ] ?? array(), $s->layout_nodes_by_id[ $control_id ]['provenance'] ?? array(), $class_tokens, $properties );
-		foreach ( $s->variants_by_node[ $control_id ] ?? array() as $variant ) {
+		self::carry_class_owned_facts( $s, $control_id, $s->layout_nodes_by_id[ $control_id ]['provenance'] ?? array(), $class_tokens, $properties, 'provider_parent_class_carried_control_spacing' );
+	}
+
+	/**
+	 * Leave a node's class-owned facts to the source stylesheet. A fact is
+	 * carried when every rule setting it selects the node by classes the
+	 * restored element keeps; a conditional patch only when its own rule is too.
+	 * Carried facts are suppressed from the overlay and recorded once.
+	 *
+	 * @param array<int,mixed>     $provenance   The node's base provenance rows.
+	 * @param array<int,string>    $class_tokens Classes the restored element carries.
+	 * @param array<string,string> $properties   Fact => CSS property eligible for carry.
+	 */
+	private static function carry_class_owned_facts( Static_Site_Importer_Form_Topology_State $s, string $node_id, array $provenance, array $class_tokens, array $properties, string $strategy ): void {
+		$carried = self::class_carried_box_facts( $s->layout_by_node[ $node_id ] ?? array(), $provenance, $class_tokens, $properties );
+		foreach ( $s->variants_by_node[ $node_id ] ?? array() as $variant ) {
 			$patch = self::layout_patch( $variant );
 			foreach ( array_keys( array_intersect_key( $patch, $properties ) ) as $fact ) {
 				$rows = array_map( static fn( $row ): mixed => is_array( $row ) ? array_merge( $row, array( 'condition' => null ) ) : $row, is_array( $variant['provenance'] ?? null ) ? $variant['provenance'] : array() );
 				if ( array( $fact ) === self::class_carried_box_facts( array( $fact => $patch[ $fact ] ), $rows, $class_tokens, $properties ) ) {
-					$s->class_carried_variants[ $control_id ][] = $fact;
+					$s->class_carried_variants[ $node_id ][] = $fact;
 				} else {
 					$carried = array_values( array_diff( $carried, array( $fact ) ) );
 				}
@@ -867,13 +841,9 @@ final class Static_Site_Importer_Form_Layout_Projection {
 		if ( array() === $carried ) {
 			return;
 		}
-		$s->suppressed_layout_properties[ $control_id ] = array_values( array_unique( array_merge( $s->suppressed_layout_properties[ $control_id ] ?? array(), $carried ) ) );
-		$s->layout_by_node[ $control_id ]               = array_diff_key( $s->layout_by_node[ $control_id ] ?? array(), array_flip( $carried ) );
-		$s->operations[]                                = array(
-			'dimension'   => 'layout',
-			'strategy'    => 'provider_parent_class_carried_control_spacing',
-			'target_hash' => hash( 'sha256', $control_id ),
-		);
+		$s->suppressed_layout_properties[ $node_id ] = array_values( array_unique( array_merge( $s->suppressed_layout_properties[ $node_id ] ?? array(), $carried ) ) );
+		$s->layout_by_node[ $node_id ]               = array_diff_key( $s->layout_by_node[ $node_id ] ?? array(), array_flip( $carried ) );
+		$s->record( 'layout', $strategy, $node_id );
 	}
 
 	/** Size the boxes of a multi-box source row as provider field widths. */
@@ -904,11 +874,7 @@ final class Static_Site_Importer_Form_Layout_Projection {
 			}
 			foreach ( array_keys( $members ) as $position => $control_index ) {
 				$s->field_blocks[ $control_index ]['attrs']['width'] = $widths[ $position ];
-				$s->operations[]                                     = array(
-					'dimension'   => 'layout',
-					'strategy'    => 'provider_row_band_field_width',
-					'target_hash' => hash( 'sha256', (string) $control_index ),
-				);
+				$s->record( 'layout', 'provider_row_band_field_width', (string) $control_index );
 			}
 		}
 	}
@@ -929,11 +895,7 @@ final class Static_Site_Importer_Form_Layout_Projection {
 			$control_index = $branch_controls[0];
 			$s->field_blocks[ $control_index ]['attrs']['className'] = self::with_semantic_markers( $s->field_blocks[ $control_index ]['attrs']['className'] ?? '', $node, 'p', self::class_tokens( $node ) );
 			$s->represented_topology_nodes[]                         = $node['id'];
-			$s->operations[] = array(
-				'dimension'   => 'topology',
-				'strategy'    => 'provider_paragraph_wrapper_projection',
-				'target_hash' => hash( 'sha256', $node['id'] ),
-			);
+			$s->record( 'topology', 'provider_paragraph_wrapper_projection', $node['id'] );
 		}
 		// A nested labelled fieldset around one to four mapped text fields is the
 		// source Name/phone group. Producers often omit legend text while still
@@ -965,12 +927,7 @@ final class Static_Site_Importer_Form_Layout_Projection {
 			}
 			$s->represented_topology_nodes[] = $node['id'];
 			$s->represented_layout_nodes[]   = $node['id'];
-			$s->operations[]                 = array(
-				'dimension'     => 'semantic',
-				'strategy'      => 'provider_labelled_text_fieldset_projection',
-				'target_hash'   => hash( 'sha256', $node['id'] ),
-				'control_count' => count( $branch_fields ),
-			);
+			$s->record( 'semantic', 'provider_labelled_text_fieldset_projection', $node['id'], array( 'control_count' => count( $branch_fields ) ) );
 		}
 		// A plain fieldset around exactly one labelled text, email, tel, or textarea
 		// control is that control's own group, whether it is nested or a peer root.
@@ -1011,11 +968,7 @@ final class Static_Site_Importer_Form_Layout_Projection {
 			$s->field_blocks[ $control_index ]['attrs']['className'] = self::with_semantic_markers( $s->field_blocks[ $control_index ]['attrs']['className'] ?? '', $node, 'fieldset', $classes );
 			$s->represented_topology_nodes[]                         = $node['id'];
 			$s->represented_layout_nodes[]                           = $node['id'];
-			$s->operations[] = array(
-				'dimension'   => 'topology',
-				'strategy'    => 'provider_plain_single_field_fieldset_projection',
-				'target_hash' => hash( 'sha256', $node['id'] ),
-			);
+			$s->record( 'topology', 'provider_plain_single_field_fieldset_projection', $node['id'] );
 		}
 		$s->mapped_controls = array_keys( $s->field_blocks );
 		sort( $s->mapped_controls );
@@ -1031,11 +984,7 @@ final class Static_Site_Importer_Form_Layout_Projection {
 			$class_tokens                    = array_values( array_filter( self::class_tokens( $node ), static fn( string $class_name ): bool => 1 === preg_match( self::CLASS_NAME_PATTERN, $class_name ) ) );
 			$s->form_classes                 = array_merge( $s->form_classes, array( 'ssi-source-root-fieldset' ), array_map( static fn( string $class_name ): string => 'ssi-source-root-fieldset--' . $class_name, array_slice( array_values( array_unique( $class_tokens ) ), 0, 8 ) ) );
 			$s->represented_topology_nodes[] = $node['id'];
-			$s->operations[]                 = array(
-				'dimension'   => 'topology',
-				'strategy'    => 'provider_plain_root_fieldset_projection',
-				'target_hash' => hash( 'sha256', $node['id'] ),
-			);
+			$s->record( 'topology', 'provider_plain_root_fieldset_projection', $node['id'] );
 			break;
 		}
 		foreach ( $s->nodes as $node ) {
@@ -1056,25 +1005,14 @@ final class Static_Site_Importer_Form_Layout_Projection {
 				$class_tokens = array();
 			}
 			$facts       = array_merge( $s->layout_nodes_by_id[ $node['id'] ]['provenance'] ?? array(), ...array_map( static fn ( array $variant ): array => is_array( $variant['provenance'] ?? null ) ? $variant['provenance'] : array(), $s->variants_by_node[ $node['id'] ] ?? array() ) );
-			$class_owned = ! empty( $facts );
-			foreach ( $facts as $fact ) {
-				$selector = is_array( $fact ) && is_string( $fact['selector'] ?? null ) ? $fact['selector'] : '';
-				if ( ! self::is_class_only_selector( $selector ) || ! array_filter( $class_tokens, static fn ( string $class_name ): bool => '' !== $class_name && (bool) preg_match( '/\.' . preg_quote( $class_name, '/' ) . '(?![a-zA-Z0-9_-])/', $selector ) ) ) {
-					$class_owned = false;
-					break;
-				}
-			}
+			$class_owned = self::class_owns_rows( $facts, $class_tokens );
 			if ( ! $class_owned && null === self::display_from_class_tokens( $class_tokens ) ) {
 				continue;
 			}
 			$s->form_classes                 = array_merge( $s->form_classes, $class_tokens );
 			$s->represented_layout_nodes[]   = $node['id'];
 			$s->represented_topology_nodes[] = $node['id'];
-			$s->operations[]                 = array(
-				'dimension'   => 'topology',
-				'strategy'    => 'provider_field_list_class_projection',
-				'target_hash' => hash( 'sha256', $node['id'] ),
-			);
+			$s->record( 'topology', 'provider_field_list_class_projection', $node['id'] );
 			break;
 		}
 	}
@@ -1247,12 +1185,14 @@ final class Static_Site_Importer_Form_Layout_Projection {
 			}
 			$s->represented_layout_nodes[]          = $parent;
 			$s->percentage_width_parents[ $parent ] = true;
-			$s->operations[]                        = array(
-				'dimension'   => 'layout',
-				'strategy'    => 'provider_gutter_compensated_row_fields',
-				'target_hash' => hash( 'sha256', $parent ),
-				'field_count' => count( $cells ),
-				'width'       => $width,
+			$s->record(
+				'layout',
+				'provider_gutter_compensated_row_fields',
+				$parent,
+				array(
+					'field_count' => count( $cells ),
+					'width'       => $width,
+				)
 			);
 			foreach ( $residual as $node_id ) {
 				$s->losses[] = array(
@@ -1438,11 +1378,7 @@ final class Static_Site_Importer_Form_Layout_Projection {
 				);
 			}
 			$s->percentage_width_parents[ $parent ] = true;
-			$s->operations[]                        = array(
-				'dimension'   => 'layout',
-				'strategy'    => 'provider_compensated_percentage_halves',
-				'target_hash' => hash( 'sha256', $parent ),
-			);
+			$s->record( 'layout', 'provider_compensated_percentage_halves', $parent );
 		}
 	}
 
@@ -1678,12 +1614,7 @@ final class Static_Site_Importer_Form_Layout_Projection {
 				}
 			}
 			$s->represented_layout_nodes[] = $parent;
-			$s->operations[]               = array(
-				'dimension'   => 'layout',
-				'strategy'    => 'provider_equal_width_fields',
-				'target_hash' => hash( 'sha256', $parent ),
-				'width'       => $width,
-			);
+			$s->record( 'layout', 'provider_equal_width_fields', $parent, array( 'width' => $width ) );
 			foreach ( $s->field_blocks as $control_index => $field_block ) {
 				if ( isset( $paired[ $control_index ] ) ) {
 					continue;
@@ -1994,12 +1925,7 @@ final class Static_Site_Importer_Form_Layout_Projection {
 				$s->grid_span_gap = is_string( $source_gap ) && Static_Site_Importer_Provider_Layout_Overlay::layout_values_are_safe( array( 'gap' => $source_gap ) ) ? $source_gap : $gap;
 			}
 			$s->represented_layout_nodes[] = $parent;
-			$s->operations[]               = array(
-				'dimension'   => 'layout',
-				'strategy'    => 'provider_grid_span_fields',
-				'target_hash' => hash( 'sha256', $parent ),
-				'field_count' => count( $tiled ),
-			);
+			$s->record( 'layout', 'provider_grid_span_fields', $parent, array( 'field_count' => count( $tiled ) ) );
 		}
 	}
 
@@ -2087,12 +2013,7 @@ final class Static_Site_Importer_Form_Layout_Projection {
 			}
 			$s->overlay_represented_nodes[] = $parent;
 			$projected                      = true;
-			$s->operations[]                = array(
-				'dimension'   => 'layout',
-				'strategy'    => 'provider_flex_cell_row_transposition',
-				'target_hash' => hash( 'sha256', $parent ),
-				'field_count' => count( $cells ),
-			);
+			$s->record( 'layout', 'provider_flex_cell_row_transposition', $parent, array( 'field_count' => count( $cells ) ) );
 		}
 		if ( $projected ) {
 			$s->suppressed_layout_properties['form'] = array_values( array_unique( array_merge( $s->suppressed_layout_properties['form'] ?? array(), array( 'display', 'direction', 'wrap' ) ) ) );
@@ -2417,28 +2338,37 @@ final class Static_Site_Importer_Form_Layout_Projection {
 	/**
 	 * State the initial flex-container values a source flex box leaves implicit.
 	 *
-	 * A source box that declares only `display: flex` is a non-wrapping row. The
-	 * producer records declared facts only, so `row`/`nowrap` never reach the
-	 * graph. Jetpack's form element is a wrapping flex layout of its own, so a
-	 * source row transposed onto it would keep that wrap and stack its field and
-	 * submit. A fact the source declares (in `$layout` or in `$declared`, the base
-	 * facts a conditional patch builds on) is never replaced.
+	 * The producer records declared facts only, so a source box that declares
+	 * only `display: flex` reaches the graph without its initial `row`, `nowrap`
+	 * and `align-items: stretch`. Jetpack's form element is a flex layout of its
+	 * own (block.json `layout.default`: wrapping, `verticalAlignment: top`, which
+	 * paints `align-items:flex-start`), so a source flex box transposed onto it
+	 * would keep that wrap and top alignment. A fact the source declares (in
+	 * `$layout` or in `$declared`, the base facts a conditional patch builds on)
+	 * is never replaced.
+	 *
+	 * The row and wrap are stated only when the source box arranged every item
+	 * the provider element holds: Jetpack also renders in-form copy and the
+	 * status output as items of that element, which the source row did not
+	 * arrange, and they keep the provider's wrap.
 	 *
 	 * @param array<string,mixed> $layout
 	 * @param array<string,mixed> $declared
+	 * @param bool                $arranges_every_item Whether the source box arranged every item of the provider element.
 	 * @return array<string,mixed>
 	 */
-	public static function with_flex_container_defaults( array $layout, array $declared = array() ): array {
+	public static function with_flex_container_defaults( array $layout, array $declared = array(), bool $arranges_every_item = true ): array {
 		if ( ! in_array( strtolower( trim( (string) ( $layout['display'] ?? '' ) ) ), array( 'flex', 'inline-flex' ), true ) ) {
 			return $layout;
 		}
-		return $layout + array_diff_key(
-			array(
+		$initial = array( 'align_items' => 'stretch' );
+		if ( $arranges_every_item ) {
+			$initial = array(
 				'direction' => 'row',
 				'wrap'      => 'nowrap',
-			),
-			$declared
-		);
+			) + $initial;
+		}
+		return $layout + array_diff_key( $initial, $declared );
 	}
 
 	/**
@@ -2892,7 +2822,57 @@ final class Static_Site_Importer_Form_Layout_Projection {
 	}
 
 	/**
-	 * Whether an unconditional source rule proves a layout node's property.
+	 * Find non-rendering field subtrees using proven ancestor display facts.
+	 *
+	 * The layout graph may omit unstyled descendants, so use control topology
+	 * for ancestry too. Any conditional display patch keeps existing behavior.
+	 * Bookkeeping-only branches retain their existing runtime-control receipt.
+	 *
+	 * @param array<string,mixed> $form Validated source form.
+	 * @return array<string,bool> Hidden subtree node IDs.
+	 * @internal
+	 */
+	public static function unconditionally_hidden_descendants( array $form ): array {
+		$nodes    = array_column( $form['layout_graph']['nodes'] ?? array(), null, 'id' );
+		$hidden   = array();
+		$ancestry = $nodes;
+		foreach ( $form['control_topology']['nodes'] ?? array() as $node ) {
+			$ancestry[ $node['id'] ] = $node;
+		}
+		foreach ( $nodes as $id => $node ) {
+			if ( 'control' === ( $node['kind'] ?? null ) || 'none' !== ( $node['layout']['display'] ?? null ) || ! self::has_unconditional_proven_property( $node, 'display' ) ) {
+				continue;
+			}
+			foreach ( $form['layout_graph']['variants'] ?? array() as $variant ) {
+				if ( ( $variant['node'] ?? null ) === $id && isset( $variant['layout_patch']['display'] ) ) {
+					continue 2;
+				}
+			}
+			$subtree = array();
+			foreach ( $ancestry as $descendant_id => $descendant ) {
+				$cursor = $descendant_id;
+				$seen   = array();
+				while ( isset( $ancestry[ $cursor ] ) && ! isset( $seen[ $cursor ] ) ) {
+					if ( $cursor === $id ) {
+						$subtree[ $descendant_id ] = true;
+						break;
+					}
+					$seen[ $cursor ] = true;
+					$cursor          = $ancestry[ $cursor ]['parent'] ?? '';
+				}
+			}
+			foreach ( $form['controls'] ?? array() as $index => $control ) {
+				if ( isset( $subtree[ 'control-' . $index ] ) && self::control_carries_authored_content( self::control_type( $control ) ) ) {
+					$hidden += $subtree;
+					break;
+				}
+			}
+		}
+		return $hidden;
+	}
+
+	/**
+	 * Whether unconditional source provenance proves a property.
 	 *
 	 * @internal
 	 */
@@ -2985,6 +2965,41 @@ final class Static_Site_Importer_Form_Layout_Projection {
 	 */
 	public static function is_class_only_selector( string $selector ): bool {
 		return 1 === preg_match( '/^(?:[a-z][a-z0-9-]*)?(?:\.[a-zA-Z][a-zA-Z0-9_-]*)+$/D', $selector );
+	}
+
+	/**
+	 * A class-only selector naming at least one of an element's classes, so the
+	 * element keeps the rule wherever it keeps those classes.
+	 *
+	 * @param array<int,mixed> $class_tokens
+	 * @internal
+	 */
+	public static function class_only_selector_names( string $selector, array $class_tokens ): bool {
+		if ( ! self::is_class_only_selector( $selector ) ) {
+			return false;
+		}
+		foreach ( $class_tokens as $class_token ) {
+			if ( is_string( $class_token ) && '' !== $class_token && preg_match( '/\.' . preg_quote( $class_token, '/' ) . '(?![a-zA-Z0-9_-])/', $selector ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Whether every provenance row is a class-only selector naming one of the
+	 * element's classes. No rows prove nothing.
+	 *
+	 * @param array<int,mixed> $rows
+	 * @param array<int,mixed> $class_tokens
+	 */
+	private static function class_owns_rows( array $rows, array $class_tokens ): bool {
+		foreach ( $rows as $row ) {
+			if ( ! self::class_only_selector_names( is_array( $row ) && is_string( $row['selector'] ?? null ) ? $row['selector'] : '', $class_tokens ) ) {
+				return false;
+			}
+		}
+		return array() !== $rows;
 	}
 
 	/**

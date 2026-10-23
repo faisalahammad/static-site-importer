@@ -28,9 +28,9 @@ defined( 'ABSPATH' ) || exit;
  *   without the source's "all" option, so the source controls are what keep
  *   the source design.
  *
- * Any other control keeps its source block unchanged. The page
- * keeps the result, and the theme serves it as the `archive-product`
- * template, which WooCommerce renders at the shop page's URL.
+ * Any other control keeps its source block unchanged. The theme serves this
+ * archive markup as `archive-product`. The page instead uses a hand-picked
+ * collection of its grid's seeded products and keeps all source controls.
  */
 final class Static_Site_Importer_Woo_Product_Listing_Materializer {
 	/** Theme template WooCommerce renders for the shop page and product taxonomies. */
@@ -47,6 +47,7 @@ final class Static_Site_Importer_Woo_Product_Listing_Materializer {
 			'id'                       => 'woocommerce_product_listing',
 			'entity_type'              => 'product_listing',
 			'entity_collection'        => 'product_listings',
+			'rejected_rows_degrade'    => true,
 			'capability'               => 'shop',
 			'provider'                 => 'woocommerce',
 			'label'                    => 'WooCommerce product archive',
@@ -110,8 +111,8 @@ final class Static_Site_Importer_Woo_Product_Listing_Materializer {
 			if ( '' === $reason && ( ! is_array( $listing['grid'] ?? null ) || empty( $listing['bindings'] ) ) ) {
 				$reason = 'listing_grid_not_adopted';
 			}
-			$status                       = '' === $reason ? 'mapped' : 'skipped';
-			$report['product_listings'][] = array_filter(
+			$status = '' === $reason ? 'mapped' : 'skipped';
+			$row    = array_filter(
 				array(
 					'source_path' => (string) ( $listing['source_path'] ?? '' ),
 					'selector'    => (string) ( $listing['selector'] ?? '' ),
@@ -120,12 +121,67 @@ final class Static_Site_Importer_Woo_Product_Listing_Materializer {
 				),
 				static fn( string $value ): bool => '' !== $value
 			);
+			if ( $available && ! empty( $listing['category']['name'] ) && ! empty( $listing['category']['slug'] ) ) {
+				$row = array_merge( $row, self::materialize_category( $listing ) );
+				if ( isset( $row['error'] ) ) {
+					$status           = 'error';
+					$row['status']    = $status;
+					$report['status'] = 'error';
+				}
+			}
+			$report['product_listings'][] = $row;
 			++$report['counts'][ $status ];
 			if ( 'mapped' === $status && array() === $report['rollback']['menu_order'] ) {
 				$report['rollback']['menu_order'] = self::apply_source_order( $listing['grid'] );
 			}
 		}
 		return $report;
+	}
+
+	/**
+	 * Ensure the listing category and append grid membership, retaining a rollback receipt.
+	 *
+	 * @param array<string,mixed> $listing Prepared listing.
+	 * @return array<string,mixed> Category receipt, including any partial assignments on error.
+	 */
+	private static function materialize_category( array $listing ): array {
+		$category = $listing['category'];
+		$term     = get_term_by( 'slug', (string) $category['slug'], 'product_cat' );
+		if ( ! $term instanceof WP_Term ) {
+			// The product seeder names the same category after the listing.
+			$term = get_term_by( 'name', (string) $category['name'], 'product_cat' );
+		}
+		$created = false;
+		if ( $term instanceof WP_Term ) {
+			$term_id = (int) $term->term_id;
+		} else {
+			$inserted = wp_insert_term( (string) $category['name'], 'product_cat', array( 'slug' => (string) $category['slug'] ) );
+			if ( is_wp_error( $inserted ) ) {
+				return array( 'error' => $inserted->get_error_message() );
+			}
+			$term_id = (int) $inserted['term_id'];
+			$created = true;
+		}
+		$row = array(
+			'term_id'              => $term_id,
+			'term_created'         => $created,
+			'assigned_product_ids' => array(),
+			'added_product_ids'    => array(),
+		);
+		$ids = is_array( $listing['grid'] ?? null ) ? Static_Site_Importer_Woo_Product_Grid_Materializer::product_ids( $listing['grid'] ) : array();
+		foreach ( array_keys( $ids ) as $id ) {
+			$existing = has_term( $term_id, 'product_cat', $id );
+			$assigned = wp_set_object_terms( $id, $term_id, 'product_cat', true );
+			if ( is_wp_error( $assigned ) ) {
+				$row['error'] = $assigned->get_error_message();
+				break;
+			}
+			$row['assigned_product_ids'][] = $id;
+			if ( ! $existing ) {
+				$row['added_product_ids'][] = $id;
+			}
+		}
+		return $row;
 	}
 
 	/**
@@ -156,9 +212,27 @@ final class Static_Site_Importer_Woo_Product_Listing_Materializer {
 		return $previous;
 	}
 
-	/** Restore the menu order of every product the listing reordered. */
+	/** Restore product ordering and remove only category data added by this receipt. */
 	public static function rollback( array $report ): array {
 		$failures = array();
+		foreach ( $report['product_listings'] ?? array() as $row ) {
+			$term_id = (int) ( $row['term_id'] ?? 0 );
+			foreach ( $row['added_product_ids'] ?? array() as $id ) {
+				$removed = wp_remove_object_terms( (int) $id, $term_id, 'product_cat' );
+				if ( is_wp_error( $removed ) || false === $removed ) {
+					$failures[] = (int) $id;
+				}
+			}
+		}
+		foreach ( $report['product_listings'] ?? array() as $row ) {
+			$term_id = (int) ( $row['term_id'] ?? 0 );
+			if ( ! empty( $row['term_created'] ) ) {
+				$deleted = wp_delete_term( $term_id, 'product_cat' );
+				if ( is_wp_error( $deleted ) || false === $deleted ) {
+					$failures[] = $term_id;
+				}
+			}
+		}
 		foreach ( is_array( $report['rollback']['menu_order'] ?? null ) ? $report['rollback']['menu_order'] : array() as $id => $menu_order ) {
 			$product = get_post( (int) $id );
 			if ( ! $product instanceof WP_Post || (int) $product->menu_order === (int) $menu_order ) {
@@ -182,7 +256,7 @@ final class Static_Site_Importer_Woo_Product_Listing_Materializer {
 	}
 
 	public static function binding_block_markup( array $entity, array $result ): string {
-		return 'mapped' === ( $result['status'] ?? '' ) ? self::archive_block_markup( $entity ) : '';
+		return 'mapped' === ( $result['status'] ?? '' ) ? self::collection_block_markup( $entity, true ) : '';
 	}
 
 	/** Classic themes keep the source listing; WooCommerce's classic archive has no imported design. */
@@ -196,11 +270,24 @@ final class Static_Site_Importer_Woo_Product_Listing_Materializer {
 	 * listing the archive's products and each control a WooCommerce block.
 	 */
 	public static function archive_block_markup( array $entity ): string {
-		$region = '';
+		return self::collection_block_markup( $entity, false );
+	}
+
+	/**
+	 * Build the page's hand-picked collection or the archive's inheriting collection.
+	 *
+	 * @param array<string,mixed> $entity Listing with its adopted grid.
+	 * @param bool                $page   Whether to use the page query and source controls.
+	 * @return string
+	 */
+	private static function collection_block_markup( array $entity, bool $page ): string {
+		$grid        = is_array( $entity['grid'] ?? null ) ? $entity['grid'] : array();
+		$product_ids = $page ? array_keys( Static_Site_Importer_Woo_Product_Grid_Materializer::product_ids( $grid ) ) : array();
+		$page        = $page && array() !== $product_ids;
+		$region      = '';
 		foreach ( is_array( $entity['bindings'] ?? null ) ? $entity['bindings'] : array() as $binding ) {
 			$region = is_array( $binding ) && 'commerce_listing' === ( $binding['role'] ?? '' ) ? (string) ( $binding['search_block_markup'] ?? '' ) : $region;
 		}
-		$grid        = is_array( $entity['grid'] ?? null ) ? $entity['grid'] : array();
 		$grid_anchor = (string) ( $grid['bindings'][0]['search_block_markup'] ?? '' );
 		$grid_markup = array() === $grid ? '' : Static_Site_Importer_Woo_Product_Grid_Materializer::inherited_grid_block_markup( $grid );
 		if ( '' === $region || '' === $grid_markup || 1 !== substr_count( $region, $grid_anchor ) ) {
@@ -214,7 +301,7 @@ final class Static_Site_Importer_Woo_Product_Listing_Materializer {
 				$controls[ (string) ( $control['id'] ?? '' ) ] = $control;
 			}
 		}
-		foreach ( is_array( $entity['control_bindings'] ?? null ) ? $entity['control_bindings'] : array() as $binding ) {
+		foreach ( ! $page && is_array( $entity['control_bindings'] ?? null ) ? $entity['control_bindings'] : array() as $binding ) {
 			$search      = is_array( $binding ) ? (string) ( $binding['search_block_markup'] ?? '' ) : '';
 			$replacement = self::control_block_markup( $controls[ (string) ( $binding['control'] ?? '' ) ] ?? array(), $search );
 			// A control WooCommerce cannot express, or one the listing does not
@@ -253,7 +340,15 @@ final class Static_Site_Importer_Woo_Product_Listing_Materializer {
 			'collection' => 'woocommerce/product-collection/product-catalog',
 			'className'  => Static_Site_Importer_Product_Grid_Runtime::LOOP_CLASS,
 		);
-		$json  = function_exists( 'wp_json_encode' ) ? wp_json_encode( $attrs ) : json_encode( $attrs ); // phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode
+		if ( $page ) {
+			$attrs['query']['inherit']                       = false;
+			$attrs['query']['woocommerceHandPickedProducts'] = $product_ids;
+			$attrs['query']['orderBy']                       = 'post__in';
+			$attrs['query']['perPage']                       = count( $product_ids );
+			$attrs['query']['pages']                         = 1;
+			$attrs['collection']                             = 'woocommerce/product-collection/hand-picked';
+		}
+		$json = function_exists( 'wp_json_encode' ) ? wp_json_encode( $attrs ) : json_encode( $attrs ); // phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode
 		if ( ! is_string( $json ) ) {
 			return '';
 		}

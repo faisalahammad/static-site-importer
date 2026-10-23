@@ -34,6 +34,10 @@ For an isolated runtime matrix, invoke the ability with `plan`, `slug`, and opti
 wp static-site-importer materialize-wordpress-site-plan --plan=/path/to/plan.json --slug=generated-site
 ```
 
+## Source URL continuity
+
+Imported documents and internal links use native WordPress permalinks. Redirection is the sole owner of old-source URL continuity: imports with source documents prepare the plugin and create owner-manageable exact-path 301 rules wherever source paths differ, including `.html`, `index.html`, and nested directory aliases. Switching themes does not remove these rules. Generated themes and companion plugins contain no source-route resolver or permalink override; keep Redirection active to retain old URLs. Portable exports carry active rules through `_redirects` for reimport.
+
 ## Client Script Policy
 
 Every artifact is passed through `client_script_policy` before Blocks Engine compilation and WordPress materialization. The default is `inert`: SSI removes executable inline, local, remote, module, telemetry, and `data:` script markup, removes bundled JavaScript assets, and records each disposition in `import_report.client_script_policy`. JSON data scripts are quarantined in the report and are not emitted into the generated site.
@@ -598,6 +602,16 @@ npm run test:validation -- --json
 ### PHP Smokes
 
 PHP smokes are declared in `test-manifest.json`; run the standalone lane with `npm test` or the complete configured lanes with `npm run test:all`.
+
+Running every `tests/form-*.php` and `tests/smoke-form-*.php` also includes the real-provider rendering test, `smoke-form-repeated-instance-ids.php`. Its WordPress runtime must have Jetpack installed, active, and its Forms module enabled (installing the plugin alone is insufficient):
+
+```bash
+wp --path="$STATIC_SITE_IMPORTER_WP_ROOT" plugin install jetpack --activate
+wp --path="$STATIC_SITE_IMPORTER_WP_ROOT" jetpack module activate contact-form
+for t in tests/form-*.php tests/smoke-form-*.php; do php "$t" || exit 1; done
+```
+
+Use a disposable test WordPress installation; these setup commands change its installed plugins and active modules.
 
 ### Error Classification
 

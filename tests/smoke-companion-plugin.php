@@ -694,17 +694,16 @@ if ( is_array( $descriptor ) ) {
 
 	$files = $descriptor['files'];
 	$main  = $files['ssi-example-site/ssi-example-site.php'] ?? '';
+	$assert( ! isset( $files['ssi-example-site/includes/source-route-redirect.php'] ) && ! str_contains( implode( '', $files ), 'Source_Route_Redirect' ), 'companions-carry-no-source-route-runtime' );
 	$assert( str_contains( $main, 'Plugin Name:' ), 'main-file-has-plugin-header' );
 	$assert( str_contains( $main, 'Requires at least: 7.1' ), 'generated-plugin-requires-wordpress-7-1' );
 	$assert( str_contains( $main, "add_filter( 'render_block'" ), 'main-file-scopes-island-enqueue' );
 	$assert( str_contains( $main, 'wp_enqueue_script' ), 'main-file-enqueues-island-js' );
 	$assert( str_contains( $main, "require_once __DIR__ . '/includes/provider-form-runtime-v1.php'" ) && str_contains( $main, 'SSI_EXAMPLE_SITE_Provider_Form_Runtime_V1::register();' ), 'main-file-registers-versioned-companion-provider-form-runtime' );
 	$assert( str_contains( $main, "require_once __DIR__ . '/includes/internal-link-runtime.php'" ) && str_contains( $main, 'SSI_EXAMPLE_SITE_Internal_Link_Runtime::register();' ), 'main-file-registers-companion-internal-link-runtime' );
-	$assert( str_contains( $main, "require_once __DIR__ . '/includes/source-route-redirect.php'" ) && str_contains( $main, 'SSI_EXAMPLE_SITE_Source_Route_Redirect::register();' ), 'main-file-registers-companion-source-route-redirect' );
 	$assert( isset( $files['ssi-example-site/includes/provider-form-runtime-v1.php'] ) && str_contains( $files['ssi-example-site/includes/provider-form-runtime-v1.php'], 'final class SSI_EXAMPLE_SITE_Provider_Form_Runtime_V1' ), 'provider-form-runtime-is-emitted-under-companion-namespace' );
 	$assert( isset( $files['ssi-example-site/includes/internal-link-runtime.php'] ) && str_contains( $files['ssi-example-site/includes/internal-link-runtime.php'], 'final class SSI_EXAMPLE_SITE_Internal_Link_Runtime' ), 'internal-link-runtime-is-emitted-under-companion-namespace' );
 	$assert( 1 !== preg_match( '/Static_Site_Importer_Capture_Evidence::[A-Z]/', $files['ssi-example-site/includes/internal-link-runtime.php'] ?? '' ) && str_contains( $files['ssi-example-site/includes/internal-link-runtime.php'] ?? '', var_export( Static_Site_Importer_Capture_Evidence::MEMBER_LOGIN, true ) ), 'companion-internal-link-runtime-inlines-capture-evidence-names' );
-	$assert( isset( $files['ssi-example-site/includes/source-route-redirect.php'] ) && str_contains( $files['ssi-example-site/includes/source-route-redirect.php'], 'final class SSI_EXAMPLE_SITE_Source_Route_Redirect' ) && ! str_contains( $files['ssi-example-site/includes/source-route-redirect.php'], 'Static_Site_Importer_Source_Route_Redirect' ), 'source-route-redirect-is-emitted-under-companion-namespace' );
 	$grid_runtime = $files['ssi-example-site/includes/product-grid-runtime.php'] ?? '';
 	$assert( str_contains( $grid_runtime, 'final class SSI_EXAMPLE_SITE_Product_Grid_Runtime' ) && ! str_contains( $grid_runtime, 'Static_Site_Importer_' ), 'product-grid-runtime-is-emitted-under-companion-namespace' );
 	$assert( str_contains( $main, "require_once __DIR__ . '/includes/product-grid-runtime.php'" ) && str_contains( $main, 'SSI_EXAMPLE_SITE_Product_Grid_Runtime::register();' ), 'main-file-registers-companion-product-grid-runtime' );
@@ -874,6 +873,17 @@ if ( is_array( $layout_descriptor ) ) {
 		$assert( str_contains( $layout_output, $fragment ), 'layout-renderer-preserves-' . $fragment );
 	}
 	$assert( ! str_contains( $layout_output, '<wow-image' ) && str_contains( $layout_output, '<div data-hook="hero"><img' ), 'layout-renderer-neutralizes-custom-elements-without-dropping-safe-wrapper-attributes' );
+	$svg_data_src = 'data:image/svg+xml,%3Csvg%20viewBox%3D%220%200%20133%20100%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20%2F%3E';
+	$attributes   = array( 'content' => '<main class="story"><img src="' . $svg_data_src . '" alt=""><picture><source src="data:image/svg+xml;base64,PHN2Zz4=" type="image/svg+xml"></picture><a href="' . $svg_data_src . '">Link</a><img src="data:text/html,%3Cscript%3Ealert(1)%3C%2Fscript%3E" alt="Html"><video src="data:image/svg+xml,%3Csvg%2F%3E"></video><img src="data:image/png;base64,aGVybw==" alt="Hero"></main>' );
+	ob_start();
+	eval( '?>' . $layout_render );
+	$svg_data_output = (string) ob_get_clean();
+	$assert( str_contains( $svg_data_output, '<img src="' . $svg_data_src . '" alt="">' ), 'layout-renderer-preserves-svg-data-image-src', $svg_data_output );
+	$assert( str_contains( $svg_data_output, 'src="data:image/svg+xml;base64,PHN2Zz4="' ), 'layout-renderer-preserves-svg-data-source-src', $svg_data_output );
+	$assert( str_contains( $svg_data_output, '<img src="data:image/png;base64,aGVybw==" alt="Hero">' ), 'layout-renderer-preserves-raster-data-image-alongside-svg', $svg_data_output );
+	$assert( ! preg_match( '/href\s*=\s*["\']?\s*data:/i', $svg_data_output ), 'layout-renderer-rejects-svg-data-link-href', $svg_data_output );
+	$assert( ! str_contains( $svg_data_output, 'data:text/html' ), 'layout-renderer-rejects-non-image-data-img-src', $svg_data_output );
+	$assert( ! preg_match( '/<video\b[^>]*data:/i', $svg_data_output ), 'layout-renderer-rejects-svg-data-video-src', $svg_data_output );
 	$assert( str_contains( $layout_output, 'position:absolute' ) && str_contains( $layout_output, 'inset:0 auto auto 332px' ) && str_contains( $layout_output, 'width:405px' ) && str_contains( $layout_output, 'height:516.812px' ) && str_contains( $layout_output, 'box-sizing:border-box' ) && str_contains( $layout_output, 'overflow:hidden' ) && str_contains( $layout_output, 'transition:opacity 0.2s' ), 'layout-renderer-preserves-quoted-inline-geometry', $layout_output );
 	$assert( str_contains( $layout_output, 'overflow-x:visible' ) && str_contains( $layout_output, 'overflow-y:clip' ), 'layout-renderer-preserves-axis-specific-overflow', $layout_output );
 	$assert( str_contains( $layout_render, "add_filter( 'safe_style_css', \$safe_style_css )" ) && str_contains( $layout_render, "remove_filter( 'safe_style_css', \$safe_style_css )" ), 'layout-renderer-bounds-inline-layout-css-filter', $layout_render );
@@ -1325,10 +1335,8 @@ $assert( file_exists( WP_PLUGIN_DIR . '/ssi-example-site/blocks/custom-hero/inde
 $assert( file_exists( WP_PLUGIN_DIR . '/ssi-example-site/editor/core-enhancement.js' ) && 'window.ssiExampleEditor = true;' === (string) file_get_contents( WP_PLUGIN_DIR . '/ssi-example-site/editor/core-enhancement.js' ), 'install-writes-editor-script-asset' );
 $assert( file_exists( WP_PLUGIN_DIR . '/ssi-example-site/includes/provider-form-runtime-v1.php' ), 'install-writes-versioned-companion-provider-form-runtime' );
 $assert( file_exists( WP_PLUGIN_DIR . '/ssi-example-site/includes/internal-link-runtime.php' ), 'install-writes-companion-internal-link-runtime' );
-$assert( file_exists( WP_PLUGIN_DIR . '/ssi-example-site/includes/source-route-redirect.php' ), 'install-writes-companion-source-route-redirect' );
 $assert( isset( $GLOBALS['ssi_companion_registered_filters']['grunion_contact_form_field_html'], $GLOBALS['ssi_companion_registered_filters']['render_block_jetpack/contact-form'], $GLOBALS['ssi_companion_registered_filters']['render_block_core/button'] ), 'installed-companion-registers-provider-form-runtime-hooks' );
 $assert( isset( $GLOBALS['ssi_companion_registered_filters']['the_content'] ), 'installed-companion-registers-internal-link-runtime' );
-$assert( isset( $GLOBALS['ssi_companion_actions']['template_redirect'] ), 'installed-companion-registers-source-route-redirect' );
 $submit_filter    = $GLOBALS['ssi_companion_registered_filters']['render_block_core/button'][0][0] ?? null;
 $projected_submit = is_callable( $submit_filter ) ? call_user_func(
 	$submit_filter,
@@ -1404,7 +1412,9 @@ $css = implode( '', $GLOBALS['styles'] ?? array() );
 echo json_encode( array(
 	'filters' => count( $GLOBALS['filters']['render_block'] ?? array() ),
 	'slot'    => is_callable( $render ) ? $render( '<p>Template</p>', $slot ) : null,
-	'layout'  => str_contains( $css, '.ssi-item-template-loop.ssi-item-template-loop .wc-block-product-template' ) && str_contains( $css, 'display:contents' ),
+	// Loop wrappers are unwrapped at render time by the companion's own copy,
+	// so the layout CSS keeps only the loop root as a contents box.
+	'layout'  => 1 === count( $GLOBALS['filters']['render_block_woocommerce/product-collection'] ?? array() ) && str_contains( $css, 'display:contents' ) && ! str_contains( $css, '.wc-block-product-template' ),
 ) );
 PHP;
 $grid_runtime_file = WP_PLUGIN_DIR . '/ssi-example-site/includes/product-grid-runtime.php';
